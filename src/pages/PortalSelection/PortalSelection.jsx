@@ -7,7 +7,7 @@ import React, { useEffect } from "react";
  * https://beam.safesiteworks.com/
  *
  * This component intentionally redirects using location.replace()
- * so /m3north, /m3south and /m3infrastructure do not remain in
+ * so /m3north, /m3south and /development/m3infrastructure do not remain in
  * browser history.
  *
  * The pageshow listener also handles Chrome back/forward-cache

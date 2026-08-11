@@ -5,12 +5,12 @@ import PdfPolygonViewer from "../../components/PdfPolygonViewer";
 import { showError } from "../../components/common/Toast/Toast";
 
 // Using a direct CDN URL avoids Nginx MIME-type issues with .mjs workers
-// when the app is deployed under a sub-path (e.g. /m3infrastructure_frontend/).
+// when the app is deployed under a sub-path (e.g. /development/m3infrastructure_frontend/).
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const ZOOM_STEP = 0.25;
-const ZOOM_MIN  = 0.25;  // 25% – minimum allowed zoom
-const ZOOM_MAX  = 3.0;   // 300% – maximum allowed zoom
+const ZOOM_MIN = 0.25;  // 25% – minimum allowed zoom
+const ZOOM_MAX = 3.0;   // 300% – maximum allowed zoom
 
 function ZoneModal({
   zone,
@@ -93,8 +93,8 @@ function ZoneModal({
   }, [activeTab]);
 
   // Zoom helpers
-  const zoomIn    = () => setZoomScale((prev) => Math.min(ZOOM_MAX, parseFloat((prev + ZOOM_STEP).toFixed(2))));
-  const zoomOut   = () => setZoomScale((prev) => Math.max(ZOOM_MIN, parseFloat((prev - ZOOM_STEP).toFixed(2))));
+  const zoomIn = () => setZoomScale((prev) => Math.min(ZOOM_MAX, parseFloat((prev + ZOOM_STEP).toFixed(2))));
+  const zoomOut = () => setZoomScale((prev) => Math.max(ZOOM_MIN, parseFloat((prev - ZOOM_STEP).toFixed(2))));
   const zoomReset = () => setZoomScale(1.0);
 
   const zoomedWidth = Math.round(viewerWidth * zoomScale);
@@ -283,13 +283,13 @@ function ZoneModal({
               cursor: "pointer",
             }}
           >
-          {(() => {
-            const selectedRoomsInZoneCount = (zone?.rooms || []).filter((r) => {
-              const name = typeof r === "object" ? r.name : r;
-              return selectedRooms.includes(name);
-            }).length;
-            return `Rooms Checklist (${selectedRoomsInZoneCount})`;
-          })()}
+            {(() => {
+              const selectedRoomsInZoneCount = (zone?.rooms || []).filter((r) => {
+                const name = typeof r === "object" ? r.name : r;
+                return selectedRooms.includes(name);
+              }).length;
+              return `Rooms Checklist (${selectedRoomsInZoneCount})`;
+            })()}
           </button>
         </div>
 

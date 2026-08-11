@@ -76,9 +76,9 @@ const formatCompanyLogoUrl = (logoVal) => {
   }
   const cleanPath = str.startsWith("/") ? str.slice(1) : str;
   if (cleanPath.startsWith("subcontractors/")) {
-    return `https://api.beam.safesiteworks.com/m3infrastructure/${cleanPath}`;
+    return `https://api.beam.safesiteworks.com/development/m3infrastructure/${cleanPath}`;
   }
-  return `https://api.beam.safesiteworks.com/m3infrastructure/subcontractors/${cleanPath}`;
+  return `https://api.beam.safesiteworks.com/development/m3infrastructure/subcontractors/${cleanPath}`;
 };
 
 const CompanyLogo = ({ logo, name, code, color, size = 22, style = {}, className = "mini-company-badge" }) => {

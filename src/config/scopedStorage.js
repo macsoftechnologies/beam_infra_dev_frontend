@@ -10,7 +10,7 @@ const getPrefix = (defaultPrefix = "m3infra_") => {
   try {
     const pathname = window.location.pathname.toLowerCase();
     if (pathname.includes("/m3north")) return "m3north_";
-    if (pathname.includes("/m3infrastructure")) return "m3infra_";
+    if (pathname.includes("/development/m3infrastructure")) return "m3infra_";
     if (pathname.includes("/m3south")) return "m3south_";
   } catch (e) {
     // ignore
