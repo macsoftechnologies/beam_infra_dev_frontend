@@ -179,6 +179,12 @@ const Rooms = () => {
     }
   };
 
+  const statusLabelMap = {
+    UC: "Construction",
+    C: "Commissioning",
+    HO: "Hand Over",
+  };
+
   // ─── Table columns ────────────────────────────────────────────────────────
   const columns = [
     { header: "S.No", accessor: "serial" },
@@ -186,13 +192,37 @@ const Rooms = () => {
     { header: "Floor / Level", accessor: "floorName" },
     { header: "Zone Name", accessor: "zoneName" },
     { header: "Room Name", accessor: "room_name" },
+    { header: "Status", accessor: "statusBadge" },
   ];
 
-  const tableData = roomList.map((item, index) => {
+  const tableData = (Array.isArray(roomList) ? roomList : []).map((item, index) => {
     const flObj = floorMap[item.fl_id];
     const floorName = flObj ? flObj.floor_name : "—";
     const buildingName = item.building_id ? (buildingMap[item.building_id] || "—") : (flObj ? (buildingMap[flObj.build_id] || "—") : "—");
     const zoneName = zoneMap[item.zone_id] || "—";
+    const rawStatus = item.status || "UC";
+
+    const statusBadge = (
+      <select
+        value={rawStatus}
+        onChange={(e) => handleStatusChange(item, e.target.value)}
+        className="df-select"
+        style={{
+          padding: "4px 8px",
+          fontSize: "0.8rem",
+          fontWeight: "600",
+          borderRadius: "6px",
+          cursor: "pointer",
+          background: rawStatus === "UC" ? "rgba(59, 130, 246, 0.15)" : rawStatus === "C" ? "rgba(168, 85, 247, 0.15)" : "rgba(34, 197, 94, 0.15)",
+          color: rawStatus === "UC" ? "#60a5fa" : rawStatus === "C" ? "#c084fc" : "#4ade80",
+          border: `1px solid ${rawStatus === "UC" ? "rgba(59, 130, 246, 0.4)" : rawStatus === "C" ? "rgba(168, 85, 247, 0.4)" : "rgba(34, 197, 94, 0.4)"}`
+        }}
+      >
+        <option value="UC" style={{ background: "#1f2937", color: "#f9fafb" }}>Construction</option>
+        <option value="C" style={{ background: "#1f2937", color: "#f9fafb" }}>Commissioning</option>
+        <option value="HO" style={{ background: "#1f2937", color: "#f9fafb" }}>Hand Over</option>
+      </select>
+    );
 
     return {
       ...item,
@@ -200,6 +230,7 @@ const Rooms = () => {
       floorName,
       buildingName,
       zoneName,
+      statusBadge,
     };
   });
 
@@ -215,10 +246,17 @@ const Rooms = () => {
             Manage and configure all room records
           </p>
         </div>
-        <div className="dept-page-header__right">
+        <div className="dept-page-header__right" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
           <span className="dept-count-badge">
             {totalCount || roomList.length} Total
           </span>
+          <button
+            className="dept-add-btn"
+            onClick={() => setOpen(true)}
+            style={{ display: "flex", alignItems: "center", gap: "6px" }}
+          >
+            + Add Room
+          </button>
         </div>
       </div>
 
