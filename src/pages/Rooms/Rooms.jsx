@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
+import ReactDOM from "react-dom";
 import { showSuccess, showError, showDeleteConfirm, showDeleteSuccess } from "../../components/common/Toast/Toast";
 import Table from "../../components/common/Table/Table";
 import Modal from "../../components/common/Modal/Modal";
@@ -13,6 +14,8 @@ const Rooms = () => {
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [selectedRoom, setSelectedRoom] = useState(null);
+  const [isActionSubmitting, setIsActionSubmitting] = useState(false);
+  const [actionSubmittingText, setActionSubmittingText] = useState("");
   const [roomList, setRoomList] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageLimit] = useState(PAGE_LIMIT_DEFAULT);
@@ -117,6 +120,8 @@ const Rooms = () => {
   const handleDelete = async (item) => {
     const result = await showDeleteConfirm();
     if (!result.isConfirmed) return;
+    setIsActionSubmitting(true);
+    setActionSubmittingText("Deleting Room...");
     try {
       await deleteRoom(item.room_id ?? item.id);
       showDeleteSuccess();
@@ -127,10 +132,14 @@ const Rooms = () => {
       fetchRoomsList(newPage, appliedRoomName);
     } catch (err) {
       showError("Failed to delete room");
+    } finally {
+      setIsActionSubmitting(false);
     }
   };
 
   const handleSubmit = async (formData) => {
+    setIsActionSubmitting(true);
+    setActionSubmittingText(selectedRoom && editOpen ? "Updating Room..." : "Adding Room...");
     try {
       if (selectedRoom && editOpen) {
         await updateRoom(selectedRoom.room_id ?? selectedRoom.id, formData);
@@ -145,6 +154,28 @@ const Rooms = () => {
       fetchRoomsList(currentPage, appliedRoomName);
     } catch (err) {
       showError("Operation failed");
+    } finally {
+      setIsActionSubmitting(false);
+    }
+  };
+
+  const handleStatusChange = async (item, newStatus) => {
+    setIsActionSubmitting(true);
+    setActionSubmittingText("Updating Room Status...");
+    try {
+      await updateRoom(item.room_id ?? item.id, {
+        building_id: item.building_id,
+        fl_id: item.fl_id,
+        zone_id: item.zone_id,
+        room_name: item.room_name,
+        status: newStatus
+      });
+      showSuccess("Room status updated successfully");
+      fetchRoomsList(currentPage, appliedRoomName);
+    } catch (err) {
+      showError("Failed to update room status");
+    } finally {
+      setIsActionSubmitting(false);
     }
   };
 
@@ -273,6 +304,45 @@ const Rooms = () => {
         />
       </Modal>
 
+      {/* Action Submitting Overlay Loader */}
+      {isActionSubmitting && ReactDOM.createPortal(
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(15, 23, 42, 0.85)",
+          backdropFilter: "blur(8px)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 999999999,
+          color: "#ffffff"
+        }}>
+          <div style={{
+            width: "56px",
+            height: "56px",
+            border: "4px solid rgba(0, 229, 160, 0.2)",
+            borderTop: "4px solid #00e5a0",
+            borderRadius: "50%",
+            animation: "spin 0.8s linear infinite",
+            marginBottom: "20px"
+          }} />
+          <style>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
+          <h3 style={{ fontSize: "20px", fontWeight: "600", marginBottom: "8px", color: "#f9fafb" }}>
+            {actionSubmittingText || "Processing..."}
+          </h3>
+          <p style={{ color: "#9ca3af", fontSize: "14px" }}>Please wait while processing...</p>
+        </div>,
+        document.body
+      )}
     </div>
   );
 };

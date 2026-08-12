@@ -39,20 +39,27 @@ function ZoneModal({
 
     const newRoomStatus = roomStatusMap ? roomStatusMap[roomName.toLowerCase().trim()] : null;
     if (newRoomStatus) {
+      const statusLabelMap = {
+        UC: "Construction",
+        C: "Commissioning",
+        HO: "Hand Over",
+      };
+
+      const normNewStatus = String(newRoomStatus).toUpperCase().trim();
+      if (normNewStatus === "HO" || normNewStatus === "HAND OVER") {
+        showError("Cannot select a room in a Hand Over status.");
+        return;
+      }
+
       const activeStatus = selectedRooms.reduce((status, name) => {
         if (status) return status;
         return roomStatusMap ? roomStatusMap[name.toLowerCase().trim()] : null;
       }, null);
 
       if (activeStatus && activeStatus !== newRoomStatus) {
-        const statusLabelMap = {
-          UC: "Construction",
-          C: "Commissioning",
-          HO: "Hand Over",
-        };
         const activeLabel = statusLabelMap[activeStatus] || activeStatus;
         const newLabel = statusLabelMap[newRoomStatus] || newRoomStatus;
-        showError(`Cannot select a room in a ${newLabel} zone when a room in a ${activeLabel} zone is already selected.`);
+        showError(`Cannot select a room in a ${newLabel} status when a room in a ${activeLabel} status is already selected.`);
         return;
       }
     }

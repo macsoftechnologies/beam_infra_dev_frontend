@@ -979,6 +979,8 @@ const getInitialPage = () => {
   const [currentPage, setCurrentPage] = useState(getInitialPage);
   const [limit, setLimit] = useState(30);
   const [isLoading, setIsLoading] = useState(false);
+  const [isActionSubmitting, setIsActionSubmitting] = useState(false);
+  const [actionSubmittingText, setActionSubmittingText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [loadingEditId, setLoadingEditId] = useState(null);
 
@@ -2138,13 +2140,23 @@ const getInitialPage = () => {
       zone: zoneObjects
     };
 
+    setIsActionSubmitting(true);
+    setActionSubmittingText("Copying Work Permits...");
     try {
-      await createByCount(payload);
+      const res = await createByCount(payload);
+      if (res?.status >= 400 || res?.statusCode >= 400 || res?.data?.status >= 400) {
+        const errorMsg = res?.message || res?.data?.message || "Copy operation failed";
+        showError(errorMsg);
+        return;
+      }
       showSuccess("Permits copied successfully");
       setActiveModal(null);
       fetchRequests(currentPage);
-    } catch {
-      showError("Copy operation failed");
+    } catch (err) {
+      const errorMsg = err?.response?.data?.message || err?.message || "Copy operation failed";
+      showError(errorMsg);
+    } finally {
+      setIsActionSubmitting(false);
     }
   };
 
@@ -4071,11 +4083,22 @@ const getInitialPage = () => {
             </div>
 
             <div className="df-footer" style={{ marginTop: "24px" }}>
-              <button type="button" className="df-btn df-btn--cancel" onClick={() => setActiveModal(null)}>
+              <button type="button" className="df-btn df-btn--cancel" onClick={() => setActiveModal(null)} disabled={isActionSubmitting}>
                 Cancel
               </button>
-              <button type="submit" className="df-btn df-btn--submit">
-                Copy Permits
+              <button type="submit" className="df-btn df-btn--submit" disabled={isActionSubmitting} style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
+                {isActionSubmitting && (
+                  <span style={{
+                    width: "16px",
+                    height: "16px",
+                    border: "2px solid rgba(255,255,255,0.3)",
+                    borderTop: "2px solid #ffffff",
+                    borderRadius: "50%",
+                    display: "inline-block",
+                    animation: "spin 0.8s linear infinite"
+                  }} />
+                )}
+                {isActionSubmitting ? "Copying Permits..." : "Copy Permits"}
               </button>
             </div>
           </form>
@@ -4121,6 +4144,46 @@ const getInitialPage = () => {
           </div>
         )}
       </Modal>
+
+      {/* Action Submitting Overlay Loader */}
+      {isActionSubmitting && ReactDOM.createPortal(
+        <div style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(15, 23, 42, 0.85)",
+          backdropFilter: "blur(8px)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 999999999,
+          color: "#ffffff"
+        }}>
+          <div style={{
+            width: "56px",
+            height: "56px",
+            border: "4px solid rgba(0, 229, 160, 0.2)",
+            borderTop: "4px solid #00e5a0",
+            borderRadius: "50%",
+            animation: "spin 0.8s linear infinite",
+            marginBottom: "20px"
+          }} />
+          <style>{`
+            @keyframes spin {
+              0% { transform: rotate(0deg); }
+              100% { transform: rotate(360deg); }
+            }
+          `}</style>
+          <h3 style={{ fontSize: "20px", fontWeight: "600", marginBottom: "8px", color: "#f9fafb" }}>
+            {actionSubmittingText || "Processing Request..."}
+          </h3>
+          <p style={{ color: "#9ca3af", fontSize: "14px" }}>Please wait while processing...</p>
+        </div>,
+        document.body
+      )}
     </div>
   );
 };

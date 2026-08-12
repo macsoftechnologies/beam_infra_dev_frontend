@@ -1405,9 +1405,9 @@ function NewRequest() {
   const roomStatusMap = useMemo(() => {
     const mapping = {};
     roomsList.forEach(r => {
-      const zoneObj = zonesList.find(z => String(z.id) === String(r.zone_id));
-      if (zoneObj && r.room_name) {
-        mapping[r.room_name.toLowerCase().trim()] = zoneObj.status;
+      if (r && r.room_name) {
+        const roomStatusVal = r.status || (zonesList.find(z => String(z.id) === String(r.zone_id))?.status) || "UC";
+        mapping[r.room_name.toLowerCase().trim()] = roomStatusVal;
       }
     });
     return mapping;
@@ -2218,6 +2218,35 @@ function NewRequest() {
   };
 
   const toggleRoomSelection = (roomName) => {
+    if (!selectedRooms.includes(roomName)) {
+      const newRoomStatus = roomStatusMap ? roomStatusMap[roomName.toLowerCase().trim()] : null;
+      if (newRoomStatus) {
+        const statusLabelMap = {
+          UC: "Construction",
+          C: "Commissioning",
+          HO: "Hand Over",
+        };
+
+        const normNewStatus = String(newRoomStatus).toUpperCase().trim();
+        if (normNewStatus === "HO" || normNewStatus === "HAND OVER") {
+          showError("Cannot select a room in a Hand Over status.");
+          return;
+        }
+
+        const activeStatus = selectedRooms.reduce((status, name) => {
+          if (status) return status;
+          return roomStatusMap ? roomStatusMap[name.toLowerCase().trim()] : null;
+        }, null);
+
+        if (activeStatus && activeStatus !== newRoomStatus) {
+          const activeLabel = statusLabelMap[activeStatus] || activeStatus;
+          const newLabel = statusLabelMap[newRoomStatus] || newRoomStatus;
+          showError(`Cannot select a room in a ${newLabel} status when a room in a ${activeLabel} status is already selected.`);
+          return;
+        }
+      }
+    }
+
     setSelectedRooms(prev => {
       const updated = prev.includes(roomName)
         ? prev.filter(r => r !== roomName)
@@ -5000,7 +5029,7 @@ function NewRequest() {
         </Modal>
 
         {/* Fullscreen Overlay Loader when submitting permit */}
-        {isSubmittingPermit && (
+        {isSubmittingPermit && ReactDOM.createPortal(
           <div style={{
             position: "fixed",
             top: 0,
@@ -5013,7 +5042,7 @@ function NewRequest() {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            zIndex: 999999,
+            zIndex: 999999999,
             color: "#ffffff"
           }}>
             <div style={{
@@ -5037,7 +5066,8 @@ function NewRequest() {
             <p style={{ fontSize: "14px", color: "#9ca3af" }}>
               Please wait while the permit request is being processed...
             </p>
-          </div>
+          </div>,
+          document.body
         )}
       </div>
 
