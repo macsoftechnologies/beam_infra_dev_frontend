@@ -1827,7 +1827,23 @@ const getInitialPage = () => {
       await updateRequest(modalTarget.id, formData);
       showSuccess(`Status changed to ${nextStatus} successfully`);
       setActiveModal(null);
-      fetchRequests(currentPage);
+      try {
+        const freshRes = await getRequestById(modalTarget.id);
+        const updatedItem = freshRes?.data || freshRes;
+        if (updatedItem && (updatedItem.id || updatedItem.Request_status)) {
+          setRequests((prev) =>
+            prev.map((r) => (r.id === modalTarget.id ? { ...r, ...updatedItem } : r))
+          );
+        } else {
+          setRequests((prev) =>
+            prev.map((r) => (r.id === modalTarget.id ? { ...r, ...payload, Request_status: nextStatus, requestStatus: nextStatus } : r))
+          );
+        }
+      } catch {
+        setRequests((prev) =>
+          prev.map((r) => (r.id === modalTarget.id ? { ...r, ...payload, Request_status: nextStatus, requestStatus: nextStatus } : r))
+        );
+      }
     } catch (err) {
       const backendMsg = err?.response?.data?.message;
       const errMsg = Array.isArray(backendMsg)

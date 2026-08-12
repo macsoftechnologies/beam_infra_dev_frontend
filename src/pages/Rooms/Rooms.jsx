@@ -142,16 +142,25 @@ const Rooms = () => {
     setActionSubmittingText(selectedRoom && editOpen ? "Updating Room..." : "Adding Room...");
     try {
       if (selectedRoom && editOpen) {
-        await updateRoom(selectedRoom.room_id ?? selectedRoom.id, formData);
+        const targetId = selectedRoom.room_id ?? selectedRoom.id;
+        const res = await updateRoom(targetId, formData);
         showSuccess("Room updated successfully");
         setEditOpen(false);
         setSelectedRoom(null);
+        const updatedObj = res?.data || res || {};
+        setRoomList((prev) =>
+          prev.map((r) =>
+            (r.room_id ?? r.id) === targetId
+              ? { ...r, ...formData, ...updatedObj }
+              : r
+          )
+        );
       } else {
         await addRoom(formData);
         showSuccess("Room added successfully");
         setOpen(false);
+        fetchRoomsList(currentPage, appliedRoomName);
       }
-      fetchRoomsList(currentPage, appliedRoomName);
     } catch (err) {
       showError("Operation failed");
     } finally {
@@ -160,10 +169,11 @@ const Rooms = () => {
   };
 
   const handleStatusChange = async (item, newStatus) => {
+    const targetId = item.room_id ?? item.id;
     setIsActionSubmitting(true);
     setActionSubmittingText("Updating Room Status...");
     try {
-      await updateRoom(item.room_id ?? item.id, {
+      await updateRoom(targetId, {
         building_id: item.building_id,
         fl_id: item.fl_id,
         zone_id: item.zone_id,
@@ -171,7 +181,11 @@ const Rooms = () => {
         status: newStatus
       });
       showSuccess("Room status updated successfully");
-      fetchRoomsList(currentPage, appliedRoomName);
+      setRoomList((prev) =>
+        prev.map((r) =>
+          (r.room_id ?? r.id) === targetId ? { ...r, status: newStatus } : r
+        )
+      );
     } catch (err) {
       showError("Failed to update room status");
     } finally {
@@ -202,25 +216,50 @@ const Rooms = () => {
     const zoneName = zoneMap[item.zone_id] || "—";
     const rawStatus = item.status || "UC";
 
+    const statusConfig = {
+      UC: {
+        bg: "rgba(37, 99, 235, 0.1)",
+        color: "#1d4ed8",
+        border: "1px solid rgba(37, 99, 235, 0.3)",
+      },
+      C: {
+        bg: "rgba(147, 51, 234, 0.1)",
+        color: "#6b21a8",
+        border: "1px solid rgba(147, 51, 234, 0.3)",
+      },
+      HO: {
+        bg: "rgba(22, 163, 74, 0.1)",
+        color: "#15803d",
+        border: "1px solid rgba(22, 163, 74, 0.3)",
+      },
+    };
+
+    const currentCfg = statusConfig[rawStatus] || statusConfig.UC;
+
     const statusBadge = (
       <select
         value={rawStatus}
         onChange={(e) => handleStatusChange(item, e.target.value)}
-        className="df-select"
         style={{
-          padding: "4px 8px",
-          fontSize: "0.8rem",
+          appearance: "none",
+          WebkitAppearance: "none",
+          MozAppearance: "none",
+          padding: "6px 26px 6px 12px",
+          fontSize: "0.81rem",
           fontWeight: "600",
-          borderRadius: "6px",
+          borderRadius: "20px",
           cursor: "pointer",
-          background: rawStatus === "UC" ? "rgba(59, 130, 246, 0.15)" : rawStatus === "C" ? "rgba(168, 85, 247, 0.15)" : "rgba(34, 197, 94, 0.15)",
-          color: rawStatus === "UC" ? "#60a5fa" : rawStatus === "C" ? "#c084fc" : "#4ade80",
-          border: `1px solid ${rawStatus === "UC" ? "rgba(59, 130, 246, 0.4)" : rawStatus === "C" ? "rgba(168, 85, 247, 0.4)" : "rgba(34, 197, 94, 0.4)"}`
+          outline: "none",
+          background: `${currentCfg.bg} url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23374151' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E") no-repeat right 9px center`,
+          color: currentCfg.color,
+          border: currentCfg.border,
+          boxShadow: "0 1px 2px rgba(0, 0, 0, 0.04)",
+          transition: "all 0.15s ease",
         }}
       >
-        <option value="UC" style={{ background: "#1f2937", color: "#f9fafb" }}>Construction</option>
-        <option value="C" style={{ background: "#1f2937", color: "#f9fafb" }}>Commissioning</option>
-        <option value="HO" style={{ background: "#1f2937", color: "#f9fafb" }}>Hand Over</option>
+        <option value="UC">Construction</option>
+        <option value="C">Commissioning</option>
+        <option value="HO">Hand Over</option>
       </select>
     );
 
