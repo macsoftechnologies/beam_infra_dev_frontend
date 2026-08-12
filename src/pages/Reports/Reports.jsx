@@ -586,7 +586,9 @@ import {
   getRooms,
   getPlans,
   getActivities,
-  getUser
+  getUser,
+  getElectricalWorks,
+  getMechanicalWorks
 } from "../../services/authService";
 import { planRequests, searchRequests } from "../../services/requestService";
 import { buildingDataWithIds } from "../../data/buildingDataWithIds";
@@ -656,6 +658,8 @@ const INITIAL_FILTERS = {
   status: [],
   zones: [],
   hras: [],
+  electrical_works: [],
+  mechanical_works: [],
   typeOfActivityId: "",
   permitNo: "",
   keyword: ""
@@ -1051,6 +1055,10 @@ const Reports = () => {
   }, [currentUser]);
   const userContractorId = currentUser?.typeId || currentUser?.subContId || currentUser?.subContractorId;
   const isSubcontractor = userRoles.includes("subcontractor");
+  const isAdmin = userRoles.includes("admin");
+  const isDept = userRoles.includes("department");
+  const isDept1 = userRoles.includes("department1");
+  const isMultiDept = isDept && isDept1;
 
   const [filters, setFilters] = useState(INITIAL_FILTERS);
 
@@ -1079,6 +1087,8 @@ const Reports = () => {
   const [roomsList, setRoomsList] = useState([]);
   const [weeksList, setWeeksList] = useState([]);
   const [activitiesList, setActivitiesList] = useState([]);
+  const [electricalWorksList, setElectricalWorksList] = useState([]);
+  const [mechanicalWorksList, setMechanicalWorksList] = useState([]);
   const [isLoadingSelectors, setIsLoadingSelectors] = useState(true);
   const [isSearching, setIsSearching] = useState(false);
 
@@ -1086,13 +1096,15 @@ const Reports = () => {
   useEffect(() => {
     const fetchSelectors = async () => {
       try {
-        const [subRes, buildRes, floorRes, zoneRes, roomRes, actRes] = await Promise.all([
+        const [subRes, buildRes, floorRes, zoneRes, roomRes, actRes, elecRes, mechRes] = await Promise.all([
           getContractors(1, 1000),
           getBuildings(1, 1000),
           getFloors(1, 1000),
           getZones(1, 10000),
           getRooms(1, 10000),
-          getActivities(1, 1000)
+          getActivities(1, 1000),
+          getElectricalWorks(1, 1000),
+          getMechanicalWorks(1, 1000)
         ]);
         const rawContractors = subRes?.data?.rows ?? subRes?.data ?? subRes ?? [];
         const loadedContractors = rawContractors
@@ -1113,6 +1125,8 @@ const Reports = () => {
         setZonesList(zoneRes?.data ?? []);
         setRoomsList(roomRes?.data?.rows ?? roomRes?.data ?? roomRes ?? []);
         setActivitiesList(actRes?.data?.rows ?? actRes?.data ?? actRes ?? []);
+        setElectricalWorksList(elecRes?.data?.rows ?? elecRes?.data ?? elecRes ?? []);
+        setMechanicalWorksList(mechRes?.data?.rows ?? mechRes?.data ?? mechRes ?? []);
       } catch (err) {
         console.error("Failed to load selectors lists", err);
       } finally {
@@ -1121,6 +1135,20 @@ const Reports = () => {
     };
     fetchSelectors();
   }, []);
+
+  const electricalWorksOptions = useMemo(() => {
+    return (electricalWorksList || []).map((item) => ({
+      value: String(item.id ?? item.electrical_works),
+      label: item.electrical_works || item.name || String(item.id)
+    }));
+  }, [electricalWorksList]);
+
+  const mechanicalWorksOptions = useMemo(() => {
+    return (mechanicalWorksList || []).map((item) => ({
+      value: String(item.id ?? item.mechanical_works),
+      label: item.mechanical_works || item.name || String(item.id)
+    }));
+  }, [mechanicalWorksList]);
 
   // ─── Filtered Levels, Zones, and Areas ─────────────────────────────────────
   const buildingsOptions = useMemo(() => {
@@ -1351,6 +1379,12 @@ const Reports = () => {
       searchPayload.Type_Of_Activity_Id = filters.typeOfActivityId || null;
       searchPayload.PermitNo = filters.permitNo || null;
       searchPayload.Activity = filters.keyword || null;
+      searchPayload.electrical_works = Array.isArray(filters.electrical_works) && filters.electrical_works.length > 0
+        ? filters.electrical_works.join(",")
+        : null;
+      searchPayload.mechanical_works = Array.isArray(filters.mechanical_works) && filters.mechanical_works.length > 0
+        ? filters.mechanical_works.join(",")
+        : null;
 
       const targetDate = (filters.reportType === "1" && filters.date) ? filters.date : "";
 
@@ -2249,6 +2283,29 @@ const Reports = () => {
               />
             </div>
 
+            {(isDept1 || isAdmin || isMultiDept) && (
+              <>
+                <div className="df-field">
+                  <label className="df-label">Electrical Works</label>
+                  <MultiSelectDropdown
+                    placeholder="Select Electrical Works"
+                    options={electricalWorksOptions}
+                    selectedValues={filters.electrical_works || []}
+                    onChange={(vals) => handleChange("electrical_works", vals)}
+                  />
+                </div>
+
+                <div className="df-field">
+                  <label className="df-label">Mechanical Works</label>
+                  <MultiSelectDropdown
+                    placeholder="Select Mechanical Works"
+                    options={mechanicalWorksOptions}
+                    selectedValues={filters.mechanical_works || []}
+                    onChange={(vals) => handleChange("mechanical_works", vals)}
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           {/* Action Buttons */}
