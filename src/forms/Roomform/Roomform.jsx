@@ -7,7 +7,6 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
   const [floor, setFloor] = useState(""); // fl_id
   const [zone, setZone] = useState(""); // zone_id
   const [roomName, setRoomName] = useState("");
-  const [status, setStatus] = useState("UC");
 
   const [buildingsList, setBuildingsList] = useState([]);
   const [floorsList, setFloorsList] = useState([]);
@@ -40,7 +39,6 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
       setFloor(initialData.fl_id || "");
       setZone(initialData.zone_id || "");
       setBuilding(initialData.building_id || "");
-      setStatus(initialData.status || "UC");
 
       // Fallback: Resolve building id from floor if building_id is missing
       if (!initialData.building_id && initialData.fl_id && floorsList.length > 0) {
@@ -85,7 +83,7 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
     setZone("");  // Reset zone when floor changes
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
     if (!building || !floor || !zone || !roomName.trim()) return;
 
@@ -93,13 +91,11 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
       building_id: Number(building),
       fl_id: Number(floor),
       zone_id: Number(zone),
-      room_name: roomName.trim(),
-      status
+      room_name: roomName.trim()
     };
 
-    if (onSubmit) {
-      await onSubmit(payload);
-    }
+    onSubmit && onSubmit(payload);
+    onClose && onClose();
   };
 
   return (
@@ -175,23 +171,6 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
             placeholder="e.g. Conference Room 101"
             required
           />
-        </div>
-
-        {/* Status Select */}
-        <div className="df-field df-field--full">
-          <label className="df-label">
-            Status <span className="df-required">*</span>
-          </label>
-          <select
-            className="df-select"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-            required
-          >
-            <option value="UC">Construction</option>
-            <option value="C">Commissioning</option>
-            <option value="HO">Hand Over</option>
-          </select>
         </div>
 
       </div>

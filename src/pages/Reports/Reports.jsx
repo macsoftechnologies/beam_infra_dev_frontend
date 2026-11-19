@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import ReactDOM from "react-dom";
-import { showSuccess, showError } from "../../components/common/Toast/Toast";
 import Table from "../../components/common/Table/Table";
 import { FaFileCsv, FaArrowDown, FaSearch } from "react-icons/fa";
 import * as XLSX from "xlsx";
+import { getModuleUserContext, parseModuleAccess, isUserAdmin } from "../../utils/modulePermissions";
 
 const AnalogTimePicker = ({ initialTime, onSave, onCancel }) => {
   const [hour, setHour] = useState(12);
@@ -587,9 +587,7 @@ import {
   getRooms,
   getPlans,
   getActivities,
-  getUser,
-  getElectricalWorks,
-  getMechanicalWorks
+  getUser
 } from "../../services/authService";
 import { planRequests, searchRequests } from "../../services/requestService";
 import { buildingDataWithIds } from "../../data/buildingDataWithIds";
@@ -659,8 +657,6 @@ const INITIAL_FILTERS = {
   status: [],
   zones: [],
   hras: [],
-  electrical_works: [],
-  mechanical_works: [],
   typeOfActivityId: "",
   permitNo: "",
   keyword: ""
@@ -686,17 +682,28 @@ const resolveZoneNameFromRooms = (row) => {
   let zonesToSearch = [];
 
   if (levelKey) {
-    const levelLower = levelKey.toLowerCase().trim();
-    const foundKey = Object.keys(ZONE_MAPPING).find(k =>
-      k.toLowerCase().trim().includes(levelLower) || levelLower.includes(k.toLowerCase().trim())
-    );
+    const levelLower = levelKey.toLowerCase().trim().replace(/\s+/g, '');
+    const foundKey = Object.keys(ZONE_MAPPING).find(k => {
+      const kClean = k.toLowerCase().trim().replace(/\s+/g, '');
+      return kClean.includes(levelLower) || levelLower.includes(kClean);
+    });
     if (foundKey) {
       zonesToSearch = ZONE_MAPPING[foundKey] || [];
     }
   }
 
   if (zonesToSearch.length === 0) {
-    zonesToSearch = Object.values(ZONE_MAPPING).flat();
+    const bName = (row.building_name || "").toLowerCase().trim();
+    const bPrefix = bName ? bName.split(/\s+/)[0] : "";
+    const relevantKeys = Object.keys(ZONE_MAPPING).filter(k => {
+      const kLower = k.toLowerCase().trim();
+      if (bPrefix && kLower.startsWith(bPrefix)) return true;
+      if (bName && kLower.includes(bName)) return true;
+      return false;
+    });
+    if (relevantKeys.length > 0) {
+      zonesToSearch = relevantKeys.flatMap(k => ZONE_MAPPING[k] || []);
+    }
   }
 
   // Find a zoneGroup that contains a room with matching name or ID
@@ -1044,8 +1051,14 @@ const StatusBadge = ({ status }) => {
 
 const Reports = () => {
   const currentUser = useMemo(() => getUser(), []);
+  const ptwModuleCtx = useMemo(() => getModuleUserContext("permit-to-work", currentUser), [currentUser]);
   const userRoles = useMemo(() => {
-    const roleVal = currentUser?.role || currentUser?.userType || "";
+    if (isUserAdmin(currentUser)) {
+      return ["admin"];
+    }
+    const parsedMap = parseModuleAccess(currentUser?.moduleAccess);
+    const ptwRole = parsedMap["permit-to-work"];
+    const roleVal = ptwRole || currentUser?.role || currentUser?.userType || "";
     if (typeof roleVal === "string") {
       return roleVal.split(",").map(r => r.trim().toLowerCase());
     }
@@ -1054,12 +1067,30 @@ const Reports = () => {
     }
     return [String(roleVal).trim().toLowerCase()];
   }, [currentUser]);
-  const userContractorId = currentUser?.typeId || currentUser?.subContId || currentUser?.subContractorId;
-  const isSubcontractor = userRoles.includes("subcontractor");
-  const isAdmin = userRoles.includes("admin");
-  const isDept = userRoles.includes("department");
-  const isDept1 = userRoles.includes("department1");
-  const isMultiDept = isDept && isDept1;
+
+  const activeRole = (localStorage.getItem("UserType") || "").toLowerCase().trim();
+  const isObserver = activeRole ? activeRole.includes("observer") : (userRoles.includes("observer") && !userRoles.some(r => ["admin", "superadmin", "department", "department1"].includes(r)));
+  const isAdmin = !isObserver && (userRoles.some(r => ["admin", "superadmin"].includes(r)) || isUserAdmin(currentUser));
+  const isDept = !isObserver && userRoles.includes("department");
+  const isDept1 = !isObserver && userRoles.includes("department1");
+  const isSubcontractor = !isObserver && (userRoles.includes("subcontractor") ||
+    userRoles.includes("contractor") ||
+    userRoles.includes("sub_contractor") ||
+    userRoles.includes("sub-contractor")) && !isDept && !isDept1 && !isAdmin;
+
+  const userContractorId = useMemo(() => {
+    if (ptwModuleCtx.contractorId) return String(ptwModuleCtx.contractorId);
+    const rawSubId =
+      currentUser?.subContId !== undefined && currentUser?.subContId !== null ? currentUser.subContId :
+      currentUser?.subcontractor_id !== undefined && currentUser?.subcontractor_id !== null ? currentUser.subcontractor_id :
+      currentUser?.subContractorId !== undefined && currentUser?.subContractorId !== null ? currentUser.subContractorId :
+      null;
+    if (rawSubId) return String(rawSubId);
+    if (isSubcontractor && currentUser?.typeId && !currentUser?.departId) {
+      return String(currentUser.typeId);
+    }
+    return "";
+  }, [currentUser, ptwModuleCtx, isSubcontractor]);
 
   const [filters, setFilters] = useState(INITIAL_FILTERS);
 
@@ -1088,8 +1119,6 @@ const Reports = () => {
   const [roomsList, setRoomsList] = useState([]);
   const [weeksList, setWeeksList] = useState([]);
   const [activitiesList, setActivitiesList] = useState([]);
-  const [electricalWorksList, setElectricalWorksList] = useState([]);
-  const [mechanicalWorksList, setMechanicalWorksList] = useState([]);
   const [isLoadingSelectors, setIsLoadingSelectors] = useState(true);
   const [isSearching, setIsSearching] = useState(false);
 
@@ -1097,15 +1126,13 @@ const Reports = () => {
   useEffect(() => {
     const fetchSelectors = async () => {
       try {
-        const [subRes, buildRes, floorRes, zoneRes, roomRes, actRes, elecRes, mechRes] = await Promise.all([
+        const [subRes, buildRes, floorRes, zoneRes, roomRes, actRes] = await Promise.all([
           getContractors(1, 1000),
           getBuildings(1, 1000),
           getFloors(1, 1000),
           getZones(1, 10000),
           getRooms(1, 10000),
-          getActivities(1, 1000),
-          getElectricalWorks(1, 1000),
-          getMechanicalWorks(1, 1000)
+          getActivities(1, 1000)
         ]);
         const rawContractors = subRes?.data?.rows ?? subRes?.data ?? subRes ?? [];
         const loadedContractors = rawContractors
@@ -1126,8 +1153,6 @@ const Reports = () => {
         setZonesList(zoneRes?.data ?? []);
         setRoomsList(roomRes?.data?.rows ?? roomRes?.data ?? roomRes ?? []);
         setActivitiesList(actRes?.data?.rows ?? actRes?.data ?? actRes ?? []);
-        setElectricalWorksList(elecRes?.data?.rows ?? elecRes?.data ?? elecRes ?? []);
-        setMechanicalWorksList(mechRes?.data?.rows ?? mechRes?.data ?? mechRes ?? []);
       } catch (err) {
         console.error("Failed to load selectors lists", err);
       } finally {
@@ -1136,20 +1161,6 @@ const Reports = () => {
     };
     fetchSelectors();
   }, []);
-
-  const electricalWorksOptions = useMemo(() => {
-    return (electricalWorksList || []).map((item) => ({
-      value: String(item.id ?? item.electrical_works),
-      label: item.electrical_works || item.name || String(item.id)
-    }));
-  }, [electricalWorksList]);
-
-  const mechanicalWorksOptions = useMemo(() => {
-    return (mechanicalWorksList || []).map((item) => ({
-      value: String(item.id ?? item.mechanical_works),
-      label: item.mechanical_works || item.name || String(item.id)
-    }));
-  }, [mechanicalWorksList]);
 
   // ─── Filtered Levels, Zones, and Areas ─────────────────────────────────────
   const buildingsOptions = useMemo(() => {
@@ -1182,8 +1193,18 @@ const Reports = () => {
     }
 
     if (filters.level && filters.level.length > 0) {
+      const isLevelMatch = (filterLevel, targetName) => {
+        if (!filterLevel || !targetName) return false;
+        const fl = String(filterLevel).trim().toLowerCase();
+        const tn = String(targetName).trim().toLowerCase();
+        if (fl === tn || fl.endsWith(tn) || tn.endsWith(fl)) return true;
+        const baseFl = fl.replace(/^(?:[a-z0-9]+\s*[-:]?\s*)/i, '').trim();
+        const baseTn = tn.replace(/^(?:[a-z0-9]+\s*[-:]?\s*)/i, '').trim();
+        return baseFl.length > 0 && baseFl === baseTn;
+      };
+
       const matchedFloorIds = floorsList
-        .filter(f => filters.level.includes(f.floor_name))
+        .filter(f => filters.level.some(l => isLevelMatch(l, f.floor_name)))
         .map(f => Number(f.fl_id));
 
       const zoneIdsFromRooms = roomsList
@@ -1193,7 +1214,7 @@ const Reports = () => {
 
       zonesToFilter = zonesToFilter.filter(z => {
         const matchDirectFloorId = z.floor_id !== undefined && z.floor_id !== null && matchedFloorIds.includes(Number(z.floor_id));
-        const matchDirectLevelName = z.level !== undefined && z.level !== null && filters.level.includes(z.level);
+        const matchDirectLevelName = z.level !== undefined && z.level !== null && filters.level.some(l => isLevelMatch(l, z.level));
         const matchViaRooms = zoneIdsFromRooms.includes(Number(z.id));
         return matchDirectFloorId || matchDirectLevelName || matchViaRooms;
       });
@@ -1274,7 +1295,7 @@ const Reports = () => {
       floorName: zoneName,
       zones: groupMap[zoneName]
     }));
-  }, [roomsList, zonesList, floorsList, filters.building, filters.level]);
+  }, [roomsList, zonesList, floorsList, filters.building, filters.level, filters.zones]);
 
   // ─── Change Handlers ────────────────────────────────────────────────────────
   const handleChange = (field, value) => {
@@ -1376,16 +1397,10 @@ const Reports = () => {
       searchPayload.area = filters.area.length > 0 ? filters.area.join(",") : "";
       searchPayload.permit_type = filters.permitType || "";
       searchPayload.permit_under = filters.permitUnder || "";
-      searchPayload.night_shift = filters.nightShift ? "1" : "0";
+      searchPayload.night_shift = filters.nightShift ? "1" : "";
       searchPayload.Type_Of_Activity_Id = filters.typeOfActivityId || null;
       searchPayload.PermitNo = filters.permitNo || null;
       searchPayload.Activity = filters.keyword || null;
-      searchPayload.electrical_works = Array.isArray(filters.electrical_works) && filters.electrical_works.length > 0
-        ? filters.electrical_works.join(",")
-        : null;
-      searchPayload.mechanical_works = Array.isArray(filters.mechanical_works) && filters.mechanical_works.length > 0
-        ? filters.mechanical_works.join(",")
-        : null;
 
       const targetDate = (filters.reportType === "1" && filters.date) ? filters.date : "";
 
@@ -1463,7 +1478,7 @@ const Reports = () => {
   const handleReset = () => {
     setFilters({
       ...INITIAL_FILTERS,
-      subContractor: isSubcontractor && currentUser?.typeId ? [String(currentUser.typeId)] : []
+      subContractor: isSubcontractor && userContractorId ? [String(userContractorId)] : []
     });
     setTableData([]);
     setHasSearched(false);
@@ -1563,6 +1578,21 @@ const Reports = () => {
       return "";
     };
 
+    const formatReportTime = (timeVal) => {
+      if (!timeVal) return "";
+      const str = String(timeVal).trim();
+      if (!str || str === "null" || str === "undefined") return "";
+      if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(str)) {
+        return str;
+      }
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      }
+      return str;
+    };
+
     const headers = [
       "PermitNo", "PermitUnder", "PermitType", "ContractorName", "Sub_Contractor_Name",
       "Building_Name", "Level", "Zone", "Room_Nos", "Type_Of_Activity", "Type_Of_Work",
@@ -1570,7 +1600,7 @@ const Reports = () => {
       "Start_Time", "End_Time", "Night_Shift", "New_End_Time", "Request_status", "Notes",
       "Working_Date", "Day", "New_Date", "New_Day", "CoNM_initials", "CoMM_initials",
       "Opening_Person_Name", "Opening_Time", "Closing_Person_Name", "Closing_Time",
-      "Reject_Reason", "Cancel_Reason"
+      "Reject_Reason", "Cancel_Reason", "Close_Reason"
     ];
 
     const rows = tableData.map(x => {
@@ -1606,12 +1636,13 @@ const Reports = () => {
         New_Day: findNewDay(x),
         CoNM_initials: x.ConM_initials || "",
         CoMM_initials: x.CoMM_initials || "",
-        Opening_Person_Name: x.ConM_initials1 || x.opened_by || "",
-        Opening_Time: x.open_time || x.h_start_time || "",
-        Closing_Person_Name: x.closed_by || x.close_note || "",
-        Closing_Time: x.close_time || x.h_end_time || "",
+        Opening_Person_Name: x.ConM_initials1 || x.opened_by || x.check_in_user || "",
+        Opening_Time: formatReportTime(x.open_time || x.check_in_time || x.h_start_time),
+        Closing_Person_Name: x.closed_by || x.close_note || x.check_out_user || "",
+        Closing_Time: formatReportTime(x.close_time || x.check_out_time || x.h_end_time),
         Reject_Reason: x.reject_reason || "",
-        Cancel_Reason: x.cancel_reason || ""
+        Cancel_Reason: x.cancel_reason || "",
+        Close_Reason: x.close_reason || ""
       };
 
       return headers.map(header => {
@@ -1707,6 +1738,21 @@ const Reports = () => {
       return "";
     };
 
+    const formatReportTime = (timeVal) => {
+      if (!timeVal) return "";
+      const str = String(timeVal).trim();
+      if (!str || str === "null" || str === "undefined") return "";
+      if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(str)) {
+        return str;
+      }
+      const d = new Date(str);
+      if (!isNaN(d.getTime())) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+      }
+      return str;
+    };
+
     const headers = [
       "PermitNo", "PermitUnder", "PermitType", "ContractorName", "Sub_Contractor_Name",
       "Building_Name", "Level", "Zone", "Room_Nos", "Type_Of_Activity", "Type_Of_Work",
@@ -1714,7 +1760,7 @@ const Reports = () => {
       "Start_Time", "End_Time", "Night_Shift", "New_End_Time", "Request_status", "Notes",
       "Working_Date", "Day", "New_Date", "New_Day", "CoNM_initials", "CoMM_initials",
       "Opening_Person_Name", "Opening_Time", "Closing_Person_Name", "Closing_Time",
-      "Reject_Reason", "Cancel_Reason"
+      "Reject_Reason", "Cancel_Reason", "Close_Reason"
     ];
 
     const rowsData = tableData.map(x => {
@@ -1750,12 +1796,13 @@ const Reports = () => {
         New_Day: findNewDay(x),
         CoNM_initials: x.ConM_initials || "",
         CoMM_initials: x.CoMM_initials || "",
-        Opening_Person_Name: x.ConM_initials1 || x.opened_by || "",
-        Opening_Time: x.open_time || x.h_start_time || "",
-        Closing_Person_Name: x.closed_by || x.close_note || "",
-        Closing_Time: x.close_time || x.h_end_time || "",
+        Opening_Person_Name: x.ConM_initials1 || x.opened_by || x.check_in_user || "",
+        Opening_Time: formatReportTime(x.open_time || x.check_in_time || x.h_start_time),
+        Closing_Person_Name: x.closed_by || x.close_note || x.check_out_user || "",
+        Closing_Time: formatReportTime(x.close_time || x.check_out_time || x.h_end_time),
         Reject_Reason: x.reject_reason || "",
-        Cancel_Reason: x.cancel_reason || ""
+        Cancel_Reason: x.cancel_reason || "",
+        Close_Reason: x.close_reason || ""
       };
     });
 
@@ -1860,7 +1907,7 @@ const Reports = () => {
         <div className="df-form" style={{ padding: "24px" }}>
           <div className="df-grid">
 
-            {/* Report Type & Date Selection */}
+            {/* Row 1: Report Type | Date */}
             <div className="df-field">
               <label className="df-label">Report Type</label>
               <select
@@ -2234,19 +2281,16 @@ const Reports = () => {
               </select>
             </div>
 
-            {/* Row 7: Type of activity | HRA Checklists */}
+            {/* Row 10: Permit Number | HRA Checklists */}
             <div className="df-field">
-              <label className="df-label">Type of activity</label>
-              <select
-                className="df-select"
-                value={filters.typeOfActivityId}
-                onChange={(e) => handleChange("typeOfActivityId", e.target.value)}
-              >
-                <option value="">All Activities</option>
-                {activitiesList.map(act => (
-                  <option key={act.id} value={act.id}>{act.activityName}</option>
-                ))}
-              </select>
+              <label className="df-label">Permit Number</label>
+              <input
+                type="text"
+                className="df-input"
+                placeholder="e.g. 82389714..."
+                value={filters.permitNo}
+                onChange={(e) => handleChange("permitNo", e.target.value)}
+              />
             </div>
 
             <div className="df-field">
@@ -2261,52 +2305,6 @@ const Reports = () => {
               />
             </div>
 
-            {/* Row 8 (Last Row): Permit Number | Keyword (Activity) */}
-            <div className="df-field">
-              <label className="df-label">Permit Number</label>
-              <input
-                type="text"
-                className="df-input"
-                placeholder="e.g. 82389714..."
-                value={filters.permitNo}
-                onChange={(e) => handleChange("permitNo", e.target.value)}
-              />
-            </div>
-
-            <div className="df-field">
-              <label className="df-label">Keyword (Activity)</label>
-              <input
-                type="text"
-                className="df-input"
-                placeholder="e.g. Piping, welding..."
-                value={filters.keyword}
-                onChange={(e) => handleChange("keyword", e.target.value)}
-              />
-            </div>
-
-            {(isDept1 || isAdmin || isMultiDept) && (
-              <>
-                <div className="df-field">
-                  <label className="df-label">Electrical Works</label>
-                  <MultiSelectDropdown
-                    placeholder="Select Electrical Works"
-                    options={electricalWorksOptions}
-                    selectedValues={filters.electrical_works || []}
-                    onChange={(vals) => handleChange("electrical_works", vals)}
-                  />
-                </div>
-
-                <div className="df-field">
-                  <label className="df-label">Mechanical Works</label>
-                  <MultiSelectDropdown
-                    placeholder="Select Mechanical Works"
-                    options={mechanicalWorksOptions}
-                    selectedValues={filters.mechanical_works || []}
-                    onChange={(vals) => handleChange("mechanical_works", vals)}
-                  />
-                </div>
-              </>
-            )}
           </div>
 
           {/* Action Buttons */}

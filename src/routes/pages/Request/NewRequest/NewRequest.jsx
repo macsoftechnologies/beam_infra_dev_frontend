@@ -382,6 +382,7 @@ import { showSuccess, showError } from "../../../components/common/Toast/Toast";
 import { useNavigate, useLocation } from "react-router-dom";
 import { HotWorks, ElectricalSystems, substanceChemical, WorkingAtHight, ConfinedSpace, ExcavationWorks, Craneslifting, electrical_works, mechanical1, testingequipment } from "../../../config/logos";
 import { HardHat, SpecificGloves, Safetyshoes, HighVisibility, Longpants, Eyeprotection, Fallprotection, Hearingprotection, Respiratoryprotection } from "../../../config/safetyIcons";
+import { getModuleUserContext, parseModuleAccess, isUserAdmin } from "../../../../utils/modulePermissions";
 
 const ELECTRICAL_WORKS_SELECT = [
   { id: "1", ElectricalWorksval: "Yes" },
@@ -468,6 +469,26 @@ const getFileUrl = (file) => {
   return `${API_BASE_URL}/requests/${filename}`;
 };
 
+const parseRoomToken = (token, defaultLevel = "", defaultZone = "") => {
+  if (!token) return { level: defaultLevel, zone: defaultZone, roomName: "", roomId: null };
+  if (typeof token === "object") {
+    return {
+      level: token.level || defaultLevel,
+      zone: token.zone || defaultZone,
+      roomName: token.name || token.room_name || token.room_nos || "",
+      roomId: token.id || token.room_id || null
+    };
+  }
+  const str = String(token);
+  const parts = str.split(":::");
+  if (parts.length === 3) {
+    return { level: parts[0], zone: parts[1], roomName: parts[2], roomId: null };
+  } else if (parts.length === 2) {
+    return { level: defaultLevel, zone: parts[0], roomName: parts[1], roomId: null };
+  }
+  return { level: defaultLevel, zone: defaultZone, roomName: str, roomId: null };
+};
+
 function NewRequest() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -496,8 +517,14 @@ function NewRequest() {
   const [building, setBuilding] = useState("");
   const [level, setLevel] = useState("");
   const currentUser = useMemo(() => getUser(), []);
+  const ptwModuleCtx = useMemo(() => getModuleUserContext("permit-to-work", currentUser), [currentUser]);
   const userRoles = useMemo(() => {
-    const roleVal = currentUser?.role || currentUser?.userType || "";
+    if (isUserAdmin(currentUser)) {
+      return ["admin"];
+    }
+    const parsedMap = parseModuleAccess(currentUser?.moduleAccess);
+    const ptwRole = parsedMap["permit-to-work"];
+    const roleVal = ptwRole || currentUser?.role || currentUser?.userType || "";
     if (typeof roleVal === "string") {
       return roleVal.split(",").map(r => r.trim().toLowerCase());
     }
@@ -506,12 +533,29 @@ function NewRequest() {
     }
     return [String(roleVal).trim().toLowerCase()];
   }, [currentUser]);
-  const isSubcontractor = userRoles.includes("subcontractor");
-  const isAdmin = userRoles.some(r => ["admin", "superadmin"].includes(r));
+  const isAdmin = userRoles.some(r => ["admin", "superadmin"].includes(r)) || isUserAdmin(currentUser);
   const isDept = userRoles.includes("department");
   const isDept1 = userRoles.includes("department1");
   const isMultiDept = isDept && isDept1;
   const isDepartmentAccess = isDept || isDept1 || isMultiDept;
+  const isSubcontractor = (userRoles.includes("subcontractor") ||
+    userRoles.includes("contractor") ||
+    userRoles.includes("sub_contractor") ||
+    userRoles.includes("sub-contractor")) && !isDepartmentAccess && !isAdmin;
+
+  const userContractorId = useMemo(() => {
+    if (ptwModuleCtx.contractorId) return String(ptwModuleCtx.contractorId);
+    const rawSubId =
+      currentUser?.subContId !== undefined && currentUser?.subContId !== null ? currentUser.subContId :
+      currentUser?.subcontractor_id !== undefined && currentUser?.subcontractor_id !== null ? currentUser.subcontractor_id :
+      currentUser?.subContractorId !== undefined && currentUser?.subContractorId !== null ? currentUser.subContractorId :
+      null;
+    if (rawSubId) return String(rawSubId);
+    if (isSubcontractor && currentUser?.typeId && !currentUser?.departId) {
+      return String(currentUser.typeId);
+    }
+    return "";
+  }, [currentUser, ptwModuleCtx, isSubcontractor]);
   const canEditOpenedPermit = isAdmin || isDepartmentAccess;
   const isReadOnly = isEditMode && (editRequest?.Request_status === "Opened" || editRequest?.request_status === "Opened") && !canEditOpenedPermit;
   const canDeleteNotes = userRoles.some(r => ["admin", "superadmin", "department", "department1"].includes(r));
@@ -826,9 +870,10 @@ function NewRequest() {
           .sort((a, b) => (a.subContractorName || "").localeCompare(b.subContractorName || "", undefined, { sensitivity: "base" }));
         setContractors(loadedContractors);
         if (isSubcontractor && loadedContractors.length > 0) {
+          const defaultSubId = userContractorId ? String(userContractorId) : String(loadedContractors[0].id);
           setFormData(prev => ({
             ...prev,
-            Sub_Contractor_Id: String(loadedContractors[0].id)
+            Sub_Contractor_Id: defaultSubId
           }));
         }
         setActivitiesList(activitiesRes?.data?.rows ?? activitiesRes?.data ?? activitiesRes ?? []);
@@ -915,13 +960,13 @@ function NewRequest() {
 
   // Default subcontractor id if current user is a contractor
   useEffect(() => {
-    if (isSubcontractor && currentUser?.typeId) {
+    if (isSubcontractor && userContractorId) {
       setFormData(prev => ({
         ...prev,
-        Sub_Contractor_Id: String(currentUser.typeId)
+        Sub_Contractor_Id: String(userContractorId)
       }));
     }
-  }, [isSubcontractor, currentUser]);
+  }, [isSubcontractor, userContractorId]);
 
   // Bind edit request data once selectors have finished loading
   useEffect(() => {
@@ -934,36 +979,89 @@ function NewRequest() {
       // Also normalise casing: DB may store "ZONE 1" but ZONE_MAPPING uses "Zone 1".
       if (editRequest.Room_Nos) {
         const editRoomParts = String(editRequest.Room_Nos).split(",").map(x => x.trim()).filter(Boolean);
-        const isIds = editRoomParts.every(part => /^\d+$/.test(part));
-        let matchedNames = [];
+        let matchedTokens = [];
+        const editBuildingId = editRequest.Building_Id || editRequest.building_id;
+        const editLevelStr = editRequest.Room_Type || "";
 
-        if (isIds) {
-          const matchedRooms = roomsList.filter(r =>
-            editRoomParts.includes(String(r.room_id ?? r.id))
-          );
+        const rawZoneIds = String(editRequest.Zone_Id || editRequest.zone_id || "").split(",").map(x => x.trim()).filter(Boolean);
+        const rawZoneNames = String(editRequest.zone_name || editRequest.zone || "").split(",").map(x => x.trim()).filter(Boolean);
 
-          // Build a lookup of all canonical room names from ZONE_MAPPING (all levels)
-          const allZoneMappingRooms = Object.values(ZONE_MAPPING)
-            .flat()
-            .flatMap(zoneGroup => zoneGroup.rooms)
-            .map(r => (typeof r === "object" ? r.name : r));
+        editRoomParts.forEach(rStr => {
+          if (rStr.includes(":::")) {
+            matchedTokens.push(rStr);
+            return;
+          }
+          const cleanName = rStr.toLowerCase().trim();
 
-          matchedNames = matchedRooms.map(r => {
-            const dbName = r.room_name || "";
-            // Try exact match first
-            const exact = allZoneMappingRooms.find(n => n === dbName);
-            if (exact) return exact;
-            // Try case-insensitive match
-            const caseMatch = allZoneMappingRooms.find(
-              n => n.toLowerCase().trim() === dbName.toLowerCase().trim()
-            );
-            return caseMatch || dbName;
+          const candidateRooms = roomsList.filter(r => {
+            const isMatch = String(r.room_id ?? r.id) === rStr || (r.room_name || r.name || r.room_nos || "").toLowerCase().trim() === cleanName;
+            if (!isMatch) return false;
+            if (editBuildingId && String(r.building_id) !== String(editBuildingId)) return false;
+            return true;
           });
-        } else {
-          matchedNames = editRoomParts;
-        }
 
-        setSelectedRooms(Array.from(new Set(matchedNames)));
+          let foundRoom = candidateRooms.find(r => {
+            if (rawZoneIds.length > 0 && rawZoneIds.includes(String(r.zone_id))) return true;
+            const zObj = zonesList.find(z => String(z.id ?? z.zoneStatusId) === String(r.zone_id));
+            if (zObj && rawZoneNames.length > 0) {
+              const zName = (zObj.zone || zObj.zone_name || zObj.name || "").toLowerCase().trim();
+              return rawZoneNames.some(pName => pName.toLowerCase().trim() === zName);
+            }
+            return false;
+          }) || candidateRooms[0];
+
+          if (foundRoom) {
+            const dbFloor = floorsList.find(f => String(f.fl_id ?? f.id ?? f.floor_id) === String(foundRoom.fl_id || foundRoom.floor_id));
+            const floorName = dbFloor ? (dbFloor.floor_name || dbFloor.name) : "";
+
+            const dbZone = zonesList.find(z => String(z.id ?? z.zoneStatusId) === String(foundRoom.zone_id));
+            const zoneName = dbZone ? (dbZone.zone || dbZone.zone_name) : "";
+
+            const roomName = foundRoom.room_name || foundRoom.name || foundRoom.room_nos || rStr;
+
+            if (floorName && zoneName) {
+              matchedTokens.push(`${floorName}:::${zoneName}:::${roomName}`);
+              return;
+            }
+          }
+
+          let matchedFloorName = "";
+          let matchedZoneName = "";
+
+          for (const zObj of zonesList) {
+            const zName = zObj.zone || zObj.zone_name || zObj.name || "";
+            const fId = zObj.floor_id || zObj.fl_id || zObj.floorId;
+            const dbFloor = floorsList.find(f => String(f.fl_id ?? f.id ?? f.floor_id) === String(fId));
+            const fName = dbFloor ? (dbFloor.floor_name || dbFloor.name) : "";
+
+            if (zName && cleanName.includes(zName.toLowerCase().trim())) {
+              matchedFloorName = fName;
+              matchedZoneName = zName;
+              break;
+            }
+          }
+
+          if (!matchedFloorName) {
+            const matchedFloor = floorsList.find(f => {
+              const fName = String(f.floor_name || f.name || f.floor || "").toLowerCase().trim();
+              return fName && (cleanName.startsWith(fName) || cleanName.includes(fName));
+            });
+            if (matchedFloor) {
+              matchedFloorName = String(matchedFloor.floor_name || matchedFloor.name || matchedFloor.floor).trim();
+            }
+          }
+
+          const finalLevel = matchedFloorName || (editLevelStr ? editLevelStr.split(",")[0].trim() : level);
+          const finalZone = matchedZoneName || (editRequest.zone_name || editRequest.zone || "Zone 1").split(",")[0].trim();
+
+          matchedTokens.push(`${finalLevel}:::${finalZone}:::${rStr}`);
+        });
+
+        setSelectedRooms(Array.from(new Set(matchedTokens)));
+
+        if (editLevelStr) {
+          setLevel(editLevelStr);
+        }
 
         // Auto-set selectedZone by matching zone_name from the fetched request
         // against the zone entries for the selected level in ZONE_MAPPING
@@ -1037,6 +1135,7 @@ function NewRequest() {
         setNotesHistory(Array.isArray(editRequest.notes) ? editRequest.notes : []);
       }
 
+      setIsnewrequestcreated(true);
       // Bind all fields into formData
       setFormData({
         Request_Date: editRequest.Request_Date || new Date().toLocaleDateString("en-GB"),
@@ -1239,11 +1338,16 @@ function NewRequest() {
 
       setIsnewrequestcreated(true);
     }
-  }, [isLoadingSelectors, editRequest]);
+  }, [isLoadingSelectors, editRequest, roomsList.length, zonesList.length, floorsList.length]);
 
   const levels = useMemo(() => {
-    return building ? floorsList.filter(f => String(f.build_id) === String(building)).map(f => f.floor_name) : [];
+    return building ? floorsList.filter(f => String(f.build_id) === String(building)).map(f => f.floor_name).slice().reverse() : [];
   }, [building, floorsList]);
+
+  const selectedBuildingName = useMemo(() => {
+    const b = buildingsList.find((x) => String(x.build_id) === String(building));
+    return b ? b.building_name : "";
+  }, [building, buildingsList]);
 
   const selectedPdf = useMemo(() => {
     if (!building) return "";
@@ -1276,32 +1380,171 @@ function NewRequest() {
     return Object.values(pdfsForBuilding)[0] || "";
   }, [building, level, buildingsList]);
 
-  const selectedZones = useMemo(() => {
-    if (!level) return [];
-    // 1. Try exact match
-    if (ZONE_MAPPING[level]) return ZONE_MAPPING[level];
+  const getZonesForLevel = (lName) => {
+    if (!lName) return [];
+    const bName = (selectedBuildingName || "").trim();
+    const lClean = lName.trim();
+    const lLower = lClean.toLowerCase();
+    const bLower = bName.toLowerCase();
 
-    // 2. Try case-insensitive substring match
-    const levelLower = level.toLowerCase().trim();
-    const foundKey = Object.keys(ZONE_MAPPING).find(key => {
+    if (ZONE_MAPPING[lClean]) return ZONE_MAPPING[lClean];
+    if (bName && ZONE_MAPPING[`${bName} ${lClean}`]) return ZONE_MAPPING[`${bName} ${lClean}`];
+    if (bName && ZONE_MAPPING[`${bName}.${lClean}`]) return ZONE_MAPPING[`${bName}.${lClean}`];
+
+    const allKeys = Object.keys(ZONE_MAPPING);
+    if (bName) {
+      const buildingKeys = allKeys.filter(k => {
+        const kLower = k.toLowerCase();
+        return kLower.startsWith(bLower) || kLower.includes(bLower);
+      });
+
+      if (buildingKeys.length > 0) {
+        const levelMatch = buildingKeys.find(k => {
+          const rest = k.toLowerCase().replace(bLower, "").trim();
+          return rest === lLower || rest.includes(lLower) || lLower.includes(rest);
+        });
+        if (levelMatch) return ZONE_MAPPING[levelMatch];
+
+        const lDigits = lLower.replace(/\D/g, "");
+        if (lDigits) {
+          const numMatch = buildingKeys.find(k => {
+            const rest = k.toLowerCase().replace(bLower, "").trim();
+            const kDigits = rest.replace(/\D/g, "");
+            return kDigits && kDigits === lDigits;
+          });
+          if (numMatch) return ZONE_MAPPING[numMatch];
+        }
+        return ZONE_MAPPING[buildingKeys[0]];
+      }
+    }
+
+    const foundKey = allKeys.find(key => {
       const keyLower = key.toLowerCase().trim();
-      return keyLower.includes(levelLower) || levelLower.includes(keyLower);
+      return keyLower === lLower || keyLower.includes(lLower) || lLower.includes(keyLower);
     });
     if (foundKey) return ZONE_MAPPING[foundKey];
-
     return [];
-  }, [level]);
+  };
+
+  const selectedZones = useMemo(() => {
+    const rawZones = getZonesForLevel(level);
+    if (!rawZones || rawZones.length === 0) return [];
+    return rawZones.map(z => {
+      const zNameClean = (z.name || "").toLowerCase().trim();
+      const dbZone = zonesList.find(dbZ => {
+        const dbZNameClean = (dbZ.zone || "").toLowerCase().trim();
+        const bMatch = building ? String(dbZ.building_id) === String(building) : true;
+        return bMatch && dbZNameClean === zNameClean;
+      });
+      return {
+        ...z,
+        status: dbZone?.status || z.status || "UC",
+        zone_id: dbZone?.id || z.id,
+      };
+    });
+  }, [level, selectedBuildingName, zonesList, building]);
+
+  const allMultiLevelZones = useMemo(() => {
+    const selectedLevelNames = Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean);
+    const targetLevels = selectedLevelNames.length > 0 ? selectedLevelNames : (levels.length > 0 ? levels : (level ? [level] : []));
+
+    const activeZones = [];
+    const allZones = [];
+
+    targetLevels.forEach(lvl => {
+      const zones = getZonesForLevel(lvl);
+      zones.forEach(z => {
+        const zoneObj = {
+          levelName: lvl,
+          zoneName: z.name,
+          rooms: z.rooms || []
+        };
+
+        const hasSelectedRoom = z.rooms && z.rooms.some(room => {
+          const roomName = typeof room === "object" ? room.name : room;
+          return selectedRooms.some(token => {
+            const parsed = parseRoomToken(token, lvl);
+            return (
+              parsed.level.toLowerCase().trim() === lvl.toLowerCase().trim() &&
+              parsed.zone.toLowerCase().trim() === z.name.toLowerCase().trim() &&
+              parsed.roomName.toLowerCase().trim() === String(roomName).toLowerCase().trim()
+            );
+          });
+        });
+
+        if (hasSelectedRoom) {
+          activeZones.push(zoneObj);
+        }
+        allZones.push(zoneObj);
+      });
+    });
+
+    return activeZones.length > 0 ? activeZones : allZones;
+  }, [levels, selectedRooms, level, selectedBuildingName]);
+
+  const toggleRoomSelection = (roomName, zoneName, levelName) => {
+    const targetLevel = levelName || level;
+    if (!targetLevel || !zoneName || !roomName) return;
+
+    const activeStatus = getActiveStatus(selectedRooms);
+    const cleanZone = zoneName.toLowerCase().trim();
+    const cleanRoom = roomName.toLowerCase().trim();
+    const zoneObj = zonesList.find(z => {
+      const zMatch = (z.zone || "").toLowerCase().trim() === cleanZone;
+      const bMatch = building ? String(z.building_id) === String(building) : true;
+      return zMatch && bMatch;
+    });
+    const newRoomStatus = (zoneObj && zoneObj.status) || (roomStatusMap && (roomStatusMap[`${cleanZone}:::${cleanRoom}`] || roomStatusMap[cleanRoom])) || null;
+
+    setSelectedRooms(prev => {
+      const isCurrentlySelected = prev.some(token => {
+        const parsed = parseRoomToken(token, targetLevel);
+        return (
+          parsed.level.toLowerCase().trim() === targetLevel.toLowerCase().trim() &&
+          parsed.zone.toLowerCase().trim() === zoneName.toLowerCase().trim() &&
+          parsed.roomName.toLowerCase().trim() === roomName.toLowerCase().trim()
+        );
+      });
+
+      if (!isCurrentlySelected && activeStatus && newRoomStatus && activeStatus !== newRoomStatus) {
+        const statusLabelMap = { UC: "Construction", C: "Commissioning", HO: "Hand Over" };
+        const activeLabel = statusLabelMap[activeStatus] || activeStatus;
+        const newLabel = statusLabelMap[newRoomStatus] || newRoomStatus;
+        showError(`Cannot select a room in a ${newLabel} zone when a room in a ${activeLabel} zone is already selected.`);
+        return prev;
+      }
+
+      if (isCurrentlySelected) {
+        return prev.filter(token => {
+          const parsed = parseRoomToken(token, targetLevel);
+          const same = (
+            parsed.level.toLowerCase().trim() === targetLevel.toLowerCase().trim() &&
+            parsed.zone.toLowerCase().trim() === zoneName.toLowerCase().trim() &&
+            parsed.roomName.toLowerCase().trim() === roomName.toLowerCase().trim()
+          );
+          return !same;
+        });
+      } else {
+        const newToken = `${targetLevel.trim()}:::${zoneName.trim()}:::${roomName.trim()}`;
+        return Array.from(new Set([...prev, newToken]));
+      }
+    });
+  };
 
   const zonesToDisplay = useMemo(() => {
     const active = selectedZones.filter(zone =>
       zone.rooms.some(room => {
         const roomName = typeof room === "object" ? room.name : room;
-        return selectedRooms.includes(roomName);
+        const roomKey = `${zone.name}:::${roomName}`;
+        return selectedRooms.includes(roomKey) || selectedRooms.includes(roomName);
       })
     );
-    if (active.length === 0 && selectedZone) {
-      const current = selectedZones.find(z => z.id === selectedZone.id || z.name === selectedZone.name);
-      return current ? [current] : [selectedZone];
+    if (active.length === 0) {
+      if (selectedZone) {
+        const current = selectedZones.find(z => z.id === selectedZone.id || z.name === selectedZone.name);
+        return current ? [current] : [selectedZone];
+      }
+      return selectedZones;
     }
     return active;
   }, [selectedZones, selectedRooms, selectedZone]);
@@ -1405,23 +1648,94 @@ function NewRequest() {
   const roomStatusMap = useMemo(() => {
     const mapping = {};
     roomsList.forEach(r => {
-      if (r && r.room_name) {
-        const roomStatusVal = r.status || (zonesList.find(z => String(z.id) === String(r.zone_id))?.status) || "UC";
-        mapping[r.room_name.toLowerCase().trim()] = roomStatusVal;
+      if (building && String(r.building_id) !== String(building)) return;
+      const zoneObj = zonesList.find(z => String(z.id) === String(r.zone_id));
+      if (zoneObj && r.room_name) {
+        const cleanRoom = r.room_name.toLowerCase().trim();
+        const cleanZone = (zoneObj.zone || "").toLowerCase().trim();
+        if (cleanZone) {
+          mapping[`${cleanZone}:::${cleanRoom}`] = zoneObj.status;
+        }
+        if (r.zone_id) {
+          mapping[`${r.zone_id}:::${cleanRoom}`] = zoneObj.status;
+        }
+        // Fallback: prioritize Commissioning ('C') so Construction doesn't overwrite it
+        if (!mapping[cleanRoom] || zoneObj.status === "C") {
+          mapping[cleanRoom] = zoneObj.status;
+        }
       }
     });
     return mapping;
-  }, [roomsList, zonesList]);
+  }, [roomsList, zonesList, building]);
 
-  const handleRoomsSelected = (rooms, zone) => {
-    setSelectedRooms(Array.from(new Set(rooms)));
-    setSelectedZone(zone);
+  const getActiveStatus = (roomsArray) => {
+    if (!roomsArray || roomsArray.length === 0) return null;
+    for (const item of roomsArray) {
+      const parsed = parseRoomToken(item);
+      const cleanZone = (parsed.zone || "").toLowerCase().trim();
+      const cleanRoom = (parsed.roomName || String(item)).toLowerCase().trim();
+      if (cleanZone) {
+        const zoneObj = zonesList.find(z => {
+          const zMatch = (z.zone || "").toLowerCase().trim() === cleanZone;
+          const bMatch = building ? String(z.building_id) === String(building) : true;
+          return zMatch && bMatch;
+        });
+        if (zoneObj && zoneObj.status) return zoneObj.status;
+        if (roomStatusMap && roomStatusMap[`${cleanZone}:::${cleanRoom}`]) {
+          return roomStatusMap[`${cleanZone}:::${cleanRoom}`];
+        }
+      }
+      const st = roomStatusMap ? roomStatusMap[cleanRoom] : null;
+      if (st) return st;
+    }
+    return null;
   };
 
-  const selectedBuildingName = useMemo(() => {
-    const b = buildingsList.find((x) => String(x.build_id) === String(building));
-    return b ? b.building_name : "";
-  }, [building, buildingsList]);
+  const handleRoomsSelected = (rooms, zone) => {
+    if (!level || !zone) return;
+    const currentLevelClean = level.trim();
+    const currentZoneClean = zone.name.trim();
+
+    if (rooms && rooms.length > 0) {
+      const activeStatus = getActiveStatus(selectedRooms);
+      const cleanZone = currentZoneClean.toLowerCase();
+      const zoneObj = zonesList.find(z => {
+        const zMatch = (z.zone || "").toLowerCase().trim() === cleanZone;
+        const bMatch = building ? String(z.building_id) === String(building) : true;
+        return zMatch && bMatch;
+      });
+      const firstRoomName = String(typeof rooms[0] === "object" ? rooms[0].name : rooms[0]).toLowerCase().trim();
+      const newZoneStatus = (zoneObj && zoneObj.status) || zone.status || (roomStatusMap ? (roomStatusMap[`${cleanZone}:::${firstRoomName}`] || roomStatusMap[firstRoomName]) : null);
+
+      if (activeStatus && newZoneStatus && activeStatus !== newZoneStatus) {
+        const statusLabelMap = { UC: "Construction", C: "Commissioning", HO: "Hand Over" };
+        const activeLabel = statusLabelMap[activeStatus] || activeStatus;
+        const newLabel = statusLabelMap[newZoneStatus] || newZoneStatus;
+        showError(`Cannot select rooms in a ${newLabel} zone when rooms in a ${activeLabel} zone are already selected.`);
+        return;
+      }
+    }
+
+    setSelectedRooms(prev => {
+      const filtered = prev.filter(token => {
+        const parsed = parseRoomToken(token, currentLevelClean, currentZoneClean);
+        const sameLevel = parsed.level.toLowerCase().trim() === currentLevelClean.toLowerCase().trim();
+        const sameZone = parsed.zone.toLowerCase().trim() === currentZoneClean.toLowerCase().trim();
+        return !(sameLevel && sameZone);
+      });
+
+      const newTokens = rooms.map(r => {
+        const rName = typeof r === "object" ? r.name : (r.includes(":::") ? r.split(":::").pop() : r);
+        return `${currentLevelClean}:::${currentZoneClean}:::${rName}`;
+      });
+
+      return Array.from(new Set([...filtered, ...newTokens]));
+    });
+    if (zone) {
+      setSelectedZone(zone);
+    }
+  };
+
 
   // Group dynamic electrical works list by module name
   const groupedElectrical = useMemo(() => {
@@ -1698,6 +2012,7 @@ function NewRequest() {
 
   const handleSubmit = async (e, status) => {
     if (e && e.preventDefault) e.preventDefault();
+    if (isSubmittingPermit) return;
 
     if (!building) {
       showError("Please select a building.");
@@ -1717,76 +2032,377 @@ function NewRequest() {
       return;
     }
 
-    // Night shift validations are handled at the field level inside timeErrors/errors checking
+    // Check that all selected rooms belong to zones with the exact same status
+    const statusesFound = new Set();
+    selectedRooms.forEach(token => {
+      const parsed = parseRoomToken(token, level);
+      const cleanZone = (parsed.zone || "").toLowerCase().trim();
+      const cleanRoom = (parsed.roomName || "").toLowerCase().trim();
+      let st = null;
+      if (cleanZone) {
+        const zoneObj = zonesList.find(z => {
+          const zMatch = (z.zone || "").toLowerCase().trim() === cleanZone;
+          const bMatch = building ? String(z.building_id) === String(building) : true;
+          return zMatch && bMatch;
+        });
+        if (zoneObj && zoneObj.status) {
+          st = zoneObj.status;
+        } else if (roomStatusMap && roomStatusMap[`${cleanZone}:::${cleanRoom}`]) {
+          st = roomStatusMap[`${cleanZone}:::${cleanRoom}`];
+        }
+      }
+      if (!st && roomStatusMap) {
+        st = roomStatusMap[cleanRoom] || null;
+      }
+      if (st) statusesFound.add(st);
+    });
+    if (statusesFound.size > 1) {
+      const statusArray = Array.from(statusesFound);
+      const statusLabelMap = { UC: "Construction", C: "Commissioning", HO: "Hand Over" };
+      const labels = statusArray.map(s => statusLabelMap[s] || s).join(" and ");
+      showError(`All selected rooms must belong to zones with the same status. Currently selected rooms mix ${labels}.`);
+      return;
+    }
 
-    // 1. Tally selected location items to resolve database IDs
+    // 1. Tally selected location items across multiple levels to resolve database IDs
     const Building_Id = building ? Number(building) : null;
 
-    const matchedFloor = floorsList.find(
-      (f) => String(f.build_id) === String(building) && (f.floor_name === level || f.floor_status === level)
-    );
-    const Floor_Id = matchedFloor ? matchedFloor.fl_id : null;
+    const allSelectedLevelNames = new Set();
 
-    // Find zone IDs and zone names
-    const selectedZoneObjects = selectedZones.filter((zone) =>
-      zone.rooms.some((room) => {
-        const roomName = typeof room === "object" ? room.name : room;
-        return selectedRooms.includes(roomName);
-      })
-    );
-    let zoneVal = selectedZoneObjects.map((z) => z.name).join(",");
-    if (!zoneVal && isEditMode && editRequest?.zone) {
-      zoneVal = typeof editRequest.zone === "object" ? (editRequest.zone.zone || "") : String(editRequest.zone);
-    } else if (!zoneVal && isEditMode && editRequest?.zone_name) {
-      zoneVal = String(editRequest.zone_name);
+    selectedRooms.forEach(token => {
+      let lName = null;
+      const str = String(token);
+      const parts = str.split(":::");
+
+      if (parts.length === 3 && parts[0]) {
+        lName = parts[0].trim();
+      } else {
+        const zName = (parts.length === 2 ? parts[0] : "").toLowerCase().trim();
+        const rName = (parts.length === 2 ? parts[1] : str).toLowerCase().trim();
+
+        let foundZone = zonesList.find(z => 
+          (z.zone || z.zone_name || z.name || "").toLowerCase().trim() === zName &&
+          (!building || String(z.building_id || z.build_id || "") === String(building))
+        );
+        if (!foundZone && rName) {
+          const foundRoomObj = roomsList.find(r => 
+            (r.room_name || r.name || "").toLowerCase().trim() === rName &&
+            (!building || String(r.building_id) === String(building))
+          );
+          if (foundRoomObj && foundRoomObj.zone_id) {
+            foundZone = zonesList.find(z => 
+              String(z.id || z.zone_id) === String(foundRoomObj.zone_id) &&
+              (!building || String(z.building_id || z.build_id || "") === String(building))
+            );
+          }
+        }
+
+        if (foundZone) {
+          const fId = foundZone.floor_id || foundZone.fl_id || foundZone.floorId;
+          if (fId) {
+            const foundFloor = floorsList.find(f => String(f.fl_id ?? f.id ?? f.floor_id) === String(fId));
+            if (foundFloor) {
+              lName = String(foundFloor.floor_name || foundFloor.name || foundFloor.floor || "").trim();
+            }
+          }
+        }
+
+        if (!lName && zName) {
+          const matchedFloor = floorsList.find(f => {
+            const fName = String(f.floor_name || f.name || f.floor || "").toLowerCase().trim();
+            return fName && (zName.startsWith(fName) || fName.startsWith(zName));
+          });
+          if (matchedFloor) {
+            lName = String(matchedFloor.floor_name || matchedFloor.name || matchedFloor.floor || "").trim();
+          }
+        }
+      }
+
+      if (lName) {
+        allSelectedLevelNames.add(lName);
+      }
+    });
+
+    if (allSelectedLevelNames.size === 0 && level) {
+      allSelectedLevelNames.add(level.trim());
     }
 
-    const matchedZoneIds = zonesList
-      .filter((z) => String(z.floor_id) === String(Floor_Id) && selectedZoneObjects.some((zo) => zo.name === z.zone))
-      .map((z) => z.id ?? z.zoneStatusId);
-    let Zone_Id = matchedZoneIds.join(",");
-    if (!Zone_Id && isEditMode && editRequest?.Zone_Id) {
-      Zone_Id = String(editRequest.Zone_Id);
+    const selectedLevelNames = Array.from(allSelectedLevelNames);
+    const Room_Type = selectedLevelNames.join(", ");
+
+    // Resolve Floor IDs across selected levels
+    const matchedFloorIds = selectedLevelNames.map(lName => {
+      const lClean = lName.toLowerCase().trim();
+      // 1. Exact match within building
+      let f = floorsList.find(floor => {
+        const isBuildingMatch = String(floor.build_id) === String(building) || String(floor.building_id) === String(building);
+        if (!isBuildingMatch) return false;
+        const fName = String(floor.floor_name || floor.name || floor.floor || "").toLowerCase().trim();
+        return fName === lClean;
+      });
+      // 2. Exact match across all floors
+      if (!f) {
+        f = floorsList.find(floor => {
+          const fName = String(floor.floor_name || floor.name || floor.floor || "").toLowerCase().trim();
+          return fName === lClean;
+        });
+      }
+      // 3. Substring match within building
+      if (!f) {
+        f = floorsList.find(floor => {
+          const isBuildingMatch = String(floor.build_id) === String(building) || String(floor.building_id) === String(building);
+          if (!isBuildingMatch) return false;
+          const fName = String(floor.floor_name || floor.name || floor.floor || "").toLowerCase().trim();
+          return fName.includes(lClean) || lClean.includes(fName);
+        });
+      }
+      // 4. Substring match across all floors
+      if (!f) {
+        f = floorsList.find(floor => {
+          const fName = String(floor.floor_name || floor.name || floor.floor || "").toLowerCase().trim();
+          return fName.includes(lClean) || lClean.includes(fName);
+        });
+      }
+      return f ? String(f.fl_id ?? f.id ?? f.floor_id) : null;
+    }).filter(Boolean);
+
+    const uniqueFloorIds = Array.from(new Set(matchedFloorIds));
+
+    // Resolve Zone names & Zone IDs across selected levels
+    const allSelectedZoneNames = new Set();
+    selectedRooms.forEach(token => {
+      const parsed = parseRoomToken(token, level);
+      if (parsed.zone) allSelectedZoneNames.add(parsed.zone);
+    });
+    if (allSelectedZoneNames.size === 0 && isEditMode && editRequest?.zone) {
+      const dbZ = typeof editRequest.zone === "object" ? (editRequest.zone.zone || "") : String(editRequest.zone);
+      if (dbZ) allSelectedZoneNames.add(dbZ);
+    } else if (allSelectedZoneNames.size === 0 && isEditMode && editRequest?.zone_name) {
+      allSelectedZoneNames.add(String(editRequest.zone_name));
     }
 
-    // Find Room IDs — multi-strategy matching
+    const uniqueZoneNames = Array.from(allSelectedZoneNames);
+    const selectedZoneIds = new Set();
+    const resolvedZoneNames = new Set();
+
+    // 1. Resolve directly from selected rooms
+    selectedRooms.forEach(token => {
+      const parsed = parseRoomToken(token, level);
+      const rName = (parsed.roomName || "").toLowerCase().trim();
+      const zName = (parsed.zone || "").toLowerCase().trim();
+
+      // 1. Zone match by name (from explicit token zone, e.g. "MU90.1C2")
+      let foundZone = null;
+      if (zName) {
+        foundZone = zonesList.find(z =>
+          (z.zone || z.zone_name || z.name || "").toLowerCase().trim() === zName &&
+          (!building || String(z.building_id || z.build_id || "") === String(building)) &&
+          (uniqueFloorIds.length === 0 || uniqueFloorIds.includes(String(z.floor_id || z.fl_id || "")))
+        );
+
+        if (!foundZone) {
+          foundZone = zonesList.find(z =>
+            (z.zone || z.zone_name || z.name || "").toLowerCase().trim() === zName &&
+            (!building || String(z.building_id || z.build_id || "") === String(building))
+          );
+        }
+
+        if (!foundZone) {
+          foundZone = zonesList.find(z =>
+            (z.zone || z.zone_name || z.name || "").toLowerCase().trim() === zName
+          );
+        }
+
+        // Loose zone name match (ignoring separators like '.', '_', ' ', '-')
+        if (!foundZone) {
+          const zNameNorm = zName.replace(/[\s._-]+/g, "");
+          foundZone = zonesList.find(z => {
+            const zn = (z.zone || z.zone_name || z.name || "").toLowerCase().trim().replace(/[\s._-]+/g, "");
+            return zn === zNameNorm;
+          });
+        }
+
+        const zId = foundZone?.id || foundZone?.zone_id || foundZone?.zoneStatusId;
+        if (zId) {
+          selectedZoneIds.add(String(zId));
+          resolvedZoneNames.add(foundZone.zone || foundZone.zone_name || parsed.zone);
+          if (foundZone.floor_id && !uniqueFloorIds.includes(String(foundZone.floor_id))) {
+            uniqueFloorIds.push(String(foundZone.floor_id));
+          }
+        }
+      }
+
+      // 2. Room lookup
+      const targetZoneId = foundZone ? String(foundZone.id ?? foundZone.zone_id ?? foundZone.zoneStatusId) : null;
+      let foundRoom = null;
+      if (targetZoneId) {
+        foundRoom = roomsList.find(r =>
+          ((r.room_name || r.name || "").toLowerCase().trim() === rName || String(r.room_id ?? r.id) === rName) &&
+          String(r.zone_id) === targetZoneId &&
+          (!building || String(r.building_id) === String(building)) &&
+          (uniqueFloorIds.length === 0 || uniqueFloorIds.includes(String(r.fl_id || r.floor_id || "")))
+        );
+      }
+
+      if (!foundRoom) {
+        foundRoom = roomsList.find(r =>
+          ((r.room_name || r.name || "").toLowerCase().trim() === rName || String(r.room_id ?? r.id) === rName) &&
+          (!building || String(r.building_id) === String(building)) &&
+          (uniqueFloorIds.length === 0 || uniqueFloorIds.includes(String(r.fl_id || r.floor_id || "")))
+        );
+      }
+
+      if (!foundRoom) {
+        foundRoom = roomsList.find(r =>
+          ((r.room_name || r.name || "").toLowerCase().trim() === rName || String(r.room_id ?? r.id) === rName) &&
+          (!building || String(r.building_id) === String(building))
+        );
+      }
+
+      if (!foundRoom) {
+        foundRoom = roomsList.find(r =>
+          (r.room_name || r.name || "").toLowerCase().trim() === rName || String(r.room_id ?? r.id) === rName
+        );
+      }
+
+      // 3. Fallback: If NO zone was found from zName, fallback to room's zone_id
+      if (!foundZone && foundRoom && foundRoom.zone_id) {
+        selectedZoneIds.add(String(foundRoom.zone_id));
+        const foundZ = zonesList.find(z => String(z.id ?? z.zoneStatusId) === String(foundRoom.zone_id));
+        if (foundZ && (foundZ.zone || foundZ.zone_name)) {
+          resolvedZoneNames.add(foundZ.zone || foundZ.zone_name);
+        }
+      }
+
+      if (foundRoom && foundRoom.fl_id && !uniqueFloorIds.includes(String(foundRoom.fl_id))) {
+        uniqueFloorIds.push(String(foundRoom.fl_id));
+      }
+    });
+
+    // 2. Fallback: If no zone IDs resolved from rooms, match zone name strictly filtered by building AND floor
+    if (selectedZoneIds.size === 0) {
+      const selectedZoneNamesLower = uniqueZoneNames.map(z => z.toLowerCase().trim());
+      zonesList.forEach(z => {
+        const isBuildingMatch = !building || String(z.building_id || z.build_id || "") === String(building);
+        const isFloorMatch = uniqueFloorIds.length > 0 ? uniqueFloorIds.includes(String(z.floor_id || z.fl_id || "")) : true;
+        const zName = (z.zone || z.zone_name || "").toLowerCase().trim();
+        const zNameNorm = zName.replace(/[\s._-]+/g, "");
+        const isMatch = selectedZoneNamesLower.length === 0 || selectedZoneNamesLower.some(sz => sz === zName || sz.replace(/[\s._-]+/g, "") === zNameNorm);
+        if (isBuildingMatch && isFloorMatch && isMatch) {
+          const idVal = z.id ?? z.zoneStatusId ?? z.zone_id;
+          if (idVal) {
+            selectedZoneIds.add(String(idVal));
+            resolvedZoneNames.add(z.zone || z.zone_name);
+          }
+        }
+      });
+    }
+
+    // 3. Fallback: selectedZone from state
+    if (selectedZoneIds.size === 0 && selectedZone) {
+      const zName = selectedZone.name || selectedZone.zone || selectedZone.zone_name;
+      let matchedZ = null;
+      if (zName) {
+        matchedZ = zonesList.find(z =>
+          (z.zone || z.zone_name || "").toLowerCase().trim() === String(zName).toLowerCase().trim() &&
+          (!building || String(z.building_id || z.build_id || "") === String(building))
+        ) || zonesList.find(z => (z.zone || z.zone_name || "").toLowerCase().trim() === String(zName).toLowerCase().trim());
+      }
+      if (matchedZ) {
+        selectedZoneIds.add(String(matchedZ.id ?? matchedZ.zone_id));
+        resolvedZoneNames.add(matchedZ.zone || matchedZ.zone_name || zName);
+      } else if (selectedZone.id && zonesList.some(z => String(z.id) === String(selectedZone.id))) {
+        selectedZoneIds.add(String(selectedZone.id));
+        if (zName) resolvedZoneNames.add(zName);
+      }
+    }
+
+    // 4. Safety fallback: if user selected rooms, grab zone of that floor
+    if (selectedZoneIds.size === 0 && selectedRooms.length > 0) {
+      const floorZones = zonesList.filter(z =>
+        (!building || String(z.building_id || z.build_id || "") === String(building)) &&
+        (uniqueFloorIds.length === 0 || uniqueFloorIds.includes(String(z.floor_id || z.fl_id || "")))
+      );
+      if (floorZones.length > 0) {
+        const firstZ = floorZones[0];
+        const idVal = firstZ.id ?? firstZ.zoneStatusId ?? firstZ.zone_id;
+        if (idVal) {
+          selectedZoneIds.add(String(idVal));
+          resolvedZoneNames.add(firstZ.zone || firstZ.zone_name);
+        }
+      }
+    }
+
+    if (selectedZoneIds.size === 0 && isEditMode && editRequest?.Zone_Id) {
+      String(editRequest.Zone_Id).split(",").forEach(s => {
+        if (s.trim()) selectedZoneIds.add(s.trim());
+      });
+    }
+
+    const Floor_Id = uniqueFloorIds.join(",");
+    const Zone_Id = Array.from(selectedZoneIds).join(",");
+    const zoneVal = (resolvedZoneNames.size > 0 ? Array.from(resolvedZoneNames) : uniqueZoneNames).join(",");
+
+    // Resolve Room IDs across selected levels
     let Room_Nos = "";
     if (selectedRooms.length > 0) {
       const getRoomNameStr = (r) => String(r.room_name || r.room_nos || r.room_number || r.roomName || r.name || "").toLowerCase().trim();
+
       const resolvedTokens = selectedRooms.map(roomItem => {
         if (!roomItem) return null;
-        if (typeof roomItem === "object") {
-          const directId = roomItem.room_id ?? roomItem.id;
-          if (directId) return String(directId);
-          roomItem = roomItem.room_name || roomItem.name || roomItem.room_nos || "";
-        }
-        const roomStr = String(roomItem).trim();
+        const parsed = parseRoomToken(roomItem, level);
+        const roomStr = String(parsed.roomName).trim();
+        const targetLevel = parsed.level;
+
+        const matchedFloor = floorsList.find(f => {
+          const isBuildingMatch = String(f.build_id) === String(building) || String(f.building_id) === String(building);
+          if (!isBuildingMatch) return false;
+          const fName = String(f.floor_name || f.name || f.floor || "").toLowerCase().trim();
+          return fName === targetLevel.toLowerCase().trim();
+        }) || floorsList.find(f => {
+          const isBuildingMatch = String(f.build_id) === String(building) || String(f.building_id) === String(building);
+          if (!isBuildingMatch) return false;
+          const fName = String(f.floor_name || f.name || f.floor || "").toLowerCase().trim();
+          return fName.includes(targetLevel.toLowerCase().trim());
+        });
+        const targetFloorId = matchedFloor ? String(matchedFloor.fl_id ?? matchedFloor.id ?? matchedFloor.floor_id) : null;
+
         if (/^\d+$/.test(roomStr)) {
-          return roomStr;
+          const exactIdMatch = roomsList.find(r =>
+            String(r.room_id ?? r.id) === roomStr &&
+            (Building_Id ? String(r.building_id) === String(Building_Id) : true) &&
+            (targetFloorId ? String(r.fl_id || r.floor_id) === String(targetFloorId) : true)
+          );
+          if (exactIdMatch) return String(exactIdMatch.room_id ?? exactIdMatch.id);
         }
+
         const roomNameLower = roomStr.toLowerCase();
+
         let matched = roomsList.find(r =>
           getRoomNameStr(r) === roomNameLower &&
-          (Floor_Id ? String(r.fl_id || r.floor_id) === String(Floor_Id) : true) &&
-          (Building_Id ? String(r.building_id) === String(Building_Id) : true)
+          (Building_Id ? String(r.building_id) === String(Building_Id) : true) &&
+          (targetFloorId ? String(r.fl_id || r.floor_id) === String(targetFloorId) : true)
         );
+
         if (!matched) {
           matched = roomsList.find(r =>
             getRoomNameStr(r) === roomNameLower &&
             (Building_Id ? String(r.building_id) === String(Building_Id) : true)
           );
         }
+
         if (!matched) {
           matched = roomsList.find(r => getRoomNameStr(r) === roomNameLower);
         }
-        if (!matched) {
-          const cleanLower = roomNameLower.replace(/[^a-z0-9]/g, "");
-          matched = roomsList.find(r => getRoomNameStr(r).replace(/[^a-z0-9]/g, "") === cleanLower);
-        }
+
         return matched ? String(matched.room_id ?? matched.id) : roomStr;
       }).filter(Boolean);
 
-      Room_Nos = [...new Set(resolvedTokens)].join(",");
+      Room_Nos = Array.from(new Set(resolvedTokens)).join(",");
+    }
+
+    if (!Room_Nos && isEditMode && editRequest?.Room_Nos) {
+      Room_Nos = String(editRequest.Room_Nos);
     }
 
     if (!Room_Nos && isEditMode && editRequest?.Room_Nos) {
@@ -1896,7 +2512,7 @@ function NewRequest() {
     console.log("[Room_Nos Debug]", {
       selectedRooms,
       Floor_Id,
-      matchedZoneIds,
+      Zone_Id,
       roomsList: roomsList.slice(0, 5),
       Room_Nos,
     });
@@ -1929,7 +2545,7 @@ function NewRequest() {
       zone: zoneVal,
       Room_Nos,
       // RoomNos: Room_Nos,
-      Room_Type: level,
+      Room_Type: Room_Type || level,
       Request_status: status || (isEditMode && (editRequest?.Request_status || editRequest?.request_status) ? (editRequest?.Request_status || editRequest?.request_status) : "Draft"),
       userId: currentUserId,
       Request_Date: isEditMode ? editRequest.Request_Date : getTodayDateString(),
@@ -2217,44 +2833,6 @@ function NewRequest() {
     }
   };
 
-  const toggleRoomSelection = (roomName) => {
-    if (!selectedRooms.includes(roomName)) {
-      const newRoomStatus = roomStatusMap ? roomStatusMap[roomName.toLowerCase().trim()] : null;
-      if (newRoomStatus) {
-        const statusLabelMap = {
-          UC: "Construction",
-          C: "Commissioning",
-          HO: "Hand Over",
-        };
-
-        const normNewStatus = String(newRoomStatus).toUpperCase().trim();
-        if (normNewStatus === "HO" || normNewStatus === "HAND OVER") {
-          showError("Cannot select a room in a Hand Over status.");
-          return;
-        }
-
-        const activeStatus = selectedRooms.reduce((status, name) => {
-          if (status) return status;
-          return roomStatusMap ? roomStatusMap[name.toLowerCase().trim()] : null;
-        }, null);
-
-        if (activeStatus && activeStatus !== newRoomStatus) {
-          const activeLabel = statusLabelMap[activeStatus] || activeStatus;
-          const newLabel = statusLabelMap[newRoomStatus] || newRoomStatus;
-          showError(`Cannot select a room in a ${newLabel} status when a room in a ${activeLabel} status is already selected.`);
-          return;
-        }
-      }
-    }
-
-    setSelectedRooms(prev => {
-      const updated = prev.includes(roomName)
-        ? prev.filter(r => r !== roomName)
-        : [...prev, roomName];
-      return Array.from(new Set(updated));
-    });
-  };
-
   if (isnewrequestcreated) {
 
     return (
@@ -2306,7 +2884,7 @@ function NewRequest() {
                   <input
                     type="text"
                     className="df-input df-readonly"
-                    value={contractors.length > 0 ? (contractors.find(c => String(c.id) === String(formData.Sub_Contractor_Id))?.subContractorName || contractors[0]?.subContractorName) : "Loading..."}
+                    value={contractors.length > 0 ? (contractors.find(c => String(c.id) === String(formData.Sub_Contractor_Id || userContractorId))?.subContractorName || contractors[0]?.subContractorName) : "Loading..."}
                     readOnly
                   />
                 ) : (
@@ -2686,7 +3264,10 @@ function NewRequest() {
                 <input
                   type="text"
                   className="df-input df-readonly"
-                  value={level}
+                  value={(() => {
+                    const selectedLevelNames = Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean);
+                    return selectedLevelNames.length > 0 ? selectedLevelNames.join(", ") : (level || "—");
+                  })()}
                   readOnly
                 />
               </div>
@@ -2705,33 +3286,57 @@ function NewRequest() {
                   className="df-input"
                   style={{ cursor: "pointer", background: "rgba(255, 255, 255, 0.02)" }}
                   placeholder="Click to select rooms..."
-                  value={selectedRooms.length > 0 ? selectedRooms.join(", ") : ""}
+                  value={(() => {
+                    if (!selectedRooms || selectedRooms.length === 0) return "";
+                    return selectedRooms.map(token => {
+                      const parsed = parseRoomToken(token, level);
+                      if (parsed.level && parsed.zone) {
+                        return `${parsed.level}: ${parsed.zone} - ${parsed.roomName}`;
+                      } else if (parsed.zone) {
+                        return `${parsed.zone} - ${parsed.roomName}`;
+                      }
+                      return parsed.roomName;
+                    }).join(", ");
+                  })()}
                   readOnly
                   onClick={() => setIsDropdownOpen(prev => !prev)}
                 />
                 <i className="ti ti-chevron-down" style={{ position: "absolute", right: "12px", top: "50%", transform: "translateY(-50%)", color: "#9ca3af", pointerEvents: "none", fontSize: "16px" }} />
               </div>
 
-              {isDropdownOpen && zonesToDisplay.length > 0 && (
-                <div className="zone-rooms-dropdown" style={{ background: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: "8px", padding: "16px", marginTop: "8px", boxShadow: "var(--shadow-md)", position: "absolute", top: "100%", left: 0, width: "100%", zIndex: 100, maxHeight: "200px", overflowY: "auto" }}>
-                  {zonesToDisplay.map((zoneToDraw) => (
-                    <div key={zoneToDraw.name} style={{ marginBottom: "20px" }}>
-                      <div style={{ fontWeight: "bold", color: "var(--color-safe, #00e5a0)", marginBottom: "12px", fontSize: "14px" }}>
-                        Zone {zoneToDraw.name}
+              {isDropdownOpen && allMultiLevelZones.length > 0 && (
+                <div className="zone-rooms-dropdown" style={{ background: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: "8px", padding: "16px", marginTop: "8px", boxShadow: "var(--shadow-md)", position: "absolute", top: "100%", left: 0, width: "100%", zIndex: 100, maxHeight: "280px", overflowY: "auto" }}>
+                  {allMultiLevelZones.map((zGroup) => (
+                    <div key={`${zGroup.levelName}:::${zGroup.zoneName}`} style={{ marginBottom: "16px" }}>
+                      <div style={{ fontWeight: "bold", color: "var(--color-safe, #00e5a0)", marginBottom: "8px", fontSize: "13px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <span>Level {zGroup.levelName} — Zone {zGroup.zoneName}</span>
+                        <span style={{ fontSize: "11px", color: "#9ca3af", fontWeight: "normal" }}>
+                          {zGroup.rooms.length} Room{zGroup.rooms.length !== 1 ? "s" : ""}
+                        </span>
                       </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "12px", paddingLeft: "8px" }}>
-                        {zoneToDraw.rooms.map((room) => {
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", paddingLeft: "8px" }}>
+                        {zGroup.rooms.map((room) => {
                           const roomName = typeof room === "object" ? room.name : room;
-                          const isChecked = selectedRooms.includes(roomName);
+                          const isChecked = selectedRooms.some(token => {
+                            const parsed = parseRoomToken(token, level);
+                            return (
+                              parsed.level.toLowerCase().trim() === zGroup.levelName.toLowerCase().trim() &&
+                              parsed.zone.toLowerCase().trim() === zGroup.zoneName.toLowerCase().trim() &&
+                              parsed.roomName.toLowerCase().trim() === roomName.toLowerCase().trim()
+                            );
+                          });
+
                           return (
-                            <label key={roomName} className="custom-checkbox-label" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                            <label key={roomName} className="custom-checkbox-label" style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
                               <input
                                 type="checkbox"
                                 className="custom-checkbox-input"
                                 checked={isChecked}
-                                onChange={() => toggleRoomSelection(roomName)}
+                                onChange={() => toggleRoomSelection(roomName, zGroup.zoneName, zGroup.levelName)}
                               />
-                              <span>{roomName}</span>
+                              <span style={{ fontSize: "13px", color: isChecked ? "#60a5fa" : "#d1d5db" }}>
+                                {roomName}
+                              </span>
                             </label>
                           );
                         })}
@@ -4919,6 +5524,7 @@ function NewRequest() {
                   <button
                     type="button"
                     className="nr-btn nr-btn--ghost"
+                    disabled={isSubmittingPermit}
                     onClick={() => navigate("/list-request")}
                   >
                     Cancel
@@ -4926,17 +5532,20 @@ function NewRequest() {
                   <button
                     type="button"
                     className="nr-btn nr-btn--ghost"
-                    style={{ background: "#2563eb", color: "#fff", borderColor: "#2563eb", boxShadow: "0 0 18px rgba(37, 99, 235, 0.2)" }}
-                    onClick={(e) => { if (validateHoldFields()) handleSubmit(e, "Hold"); }}
+                    style={{ background: "#2563eb", color: "#fff", borderColor: "#2563eb", boxShadow: "0 0 18px rgba(37, 99, 235, 0.2)", opacity: isSubmittingPermit ? 0.6 : 1 }}
+                    disabled={isSubmittingPermit}
+                    onClick={(e) => { if (!isSubmittingPermit && validateHoldFields()) handleSubmit(e, "Hold"); }}
                   >
-                    Change to Hold
+                    {isSubmittingPermit ? "Processing..." : "Change to Hold"}
                   </button>
                   <button
                     type="button"
                     className="nr-btn nr-btn--primary"
-                    onClick={(e) => handleSubmit(e, "Draft")}
+                    disabled={isSubmittingPermit}
+                    style={{ opacity: isSubmittingPermit ? 0.6 : 1 }}
+                    onClick={(e) => { if (!isSubmittingPermit) handleSubmit(e, "Draft"); }}
                   >
-                    Save as Draft
+                    {isSubmittingPermit ? "Saving..." : "Save as Draft"}
                   </button>
                 </>
               ) : (
@@ -4944,6 +5553,7 @@ function NewRequest() {
                   <button
                     type="button"
                     className="nr-btn nr-btn--ghost"
+                    disabled={isSubmittingPermit}
                     onClick={() => navigate("/list-request")}
                   >
                     Cancel
@@ -4951,9 +5561,17 @@ function NewRequest() {
                   <button
                     type="button"
                     className="nr-btn nr-btn--primary"
-                    onClick={(e) => handleSubmit(e, editRequest?.Request_status || "Draft")}
+                    disabled={isSubmittingPermit}
+                    style={{ opacity: isSubmittingPermit ? 0.6 : 1 }}
+                    onClick={(e) => {
+                      if (isSubmittingPermit) return;
+                      if (editRequest?.Request_status !== "Draft" && !validateHoldFields()) {
+                        return;
+                      }
+                      handleSubmit(e, editRequest?.Request_status || "Draft");
+                    }}
                   >
-                    Update
+                    {isSubmittingPermit ? "Updating..." : "Update"}
                   </button>
                 </>
               )
@@ -4962,6 +5580,7 @@ function NewRequest() {
                 <button
                   type="button"
                   className="nr-btn nr-btn--ghost"
+                  disabled={isSubmittingPermit}
                   onClick={() => setIsnewrequestcreated(false)}
                 >
                   Cancel
@@ -4969,21 +5588,25 @@ function NewRequest() {
                 <button
                   type="button"
                   className="nr-btn nr-btn--ghost"
-                  style={{ background: "#2563eb", color: "#fff", borderColor: "#2563eb", boxShadow: "0 0 18px rgba(37, 99, 235, 0.2)" }}
+                  style={{ background: "#2563eb", color: "#fff", borderColor: "#2563eb", boxShadow: "0 0 18px rgba(37, 99, 235, 0.2)", opacity: isSubmittingPermit ? 0.6 : 1 }}
+                  disabled={isSubmittingPermit}
                   onClick={(e) => {
+                    if (isSubmittingPermit) return;
                     if (validateHoldFields()) {
                       setShowRamsHoldModal(true);
                     }
                   }}
                 >
-                  Change to Hold
+                  {isSubmittingPermit ? "Processing..." : "Change to Hold"}
                 </button>
                 <button
                   type="button"
                   className="nr-btn nr-btn--primary"
-                  onClick={(e) => handleSubmit(e, "Draft")}
+                  disabled={isSubmittingPermit}
+                  style={{ opacity: isSubmittingPermit ? 0.6 : 1 }}
+                  onClick={(e) => { if (!isSubmittingPermit) handleSubmit(e, "Draft"); }}
                 >
-                  Save
+                  {isSubmittingPermit ? "Saving..." : "Save"}
                 </button>
               </>
             )}
@@ -4992,7 +5615,7 @@ function NewRequest() {
 
         <Modal
           open={showRamsHoldModal}
-          onClose={() => setShowRamsHoldModal(false)}
+          onClose={() => !isSubmittingPermit && setShowRamsHoldModal(false)}
           title="RAMS Confirmation"
           size="sm"
           centered={true}
@@ -5005,19 +5628,23 @@ function NewRequest() {
               <button
                 type="button"
                 className="nr-btn nr-btn--primary"
-                style={{ padding: "8px 24px" }}
+                style={{ padding: "8px 24px", opacity: isSubmittingPermit ? 0.6 : 1 }}
+                disabled={isSubmittingPermit}
                 onClick={(e) => {
+                  if (isSubmittingPermit) return;
                   setShowRamsHoldModal(false);
                   handleSubmit(e, "Hold");
                 }}
               >
-                Yes
+                {isSubmittingPermit ? "Processing..." : "Yes"}
               </button>
               <button
                 type="button"
                 className="nr-btn nr-btn--ghost"
-                style={{ padding: "8px 24px" }}
+                style={{ padding: "8px 24px", opacity: isSubmittingPermit ? 0.6 : 1 }}
+                disabled={isSubmittingPermit}
                 onClick={(e) => {
+                  if (isSubmittingPermit) return;
                   setShowRamsHoldModal(false);
                   handleSubmit(e, "Draft");
                 }}
@@ -5029,7 +5656,7 @@ function NewRequest() {
         </Modal>
 
         {/* Fullscreen Overlay Loader when submitting permit */}
-        {isSubmittingPermit && ReactDOM.createPortal(
+        {isSubmittingPermit && (
           <div style={{
             position: "fixed",
             top: 0,
@@ -5042,7 +5669,7 @@ function NewRequest() {
             flexDirection: "column",
             alignItems: "center",
             justifyContent: "center",
-            zIndex: 999999999,
+            zIndex: 999999,
             color: "#ffffff"
           }}>
             <div style={{
@@ -5066,8 +5693,7 @@ function NewRequest() {
             <p style={{ fontSize: "14px", color: "#9ca3af" }}>
               Please wait while the permit request is being processed...
             </p>
-          </div>,
-          document.body
+          </div>
         )}
       </div>
 
@@ -5124,7 +5750,6 @@ function NewRequest() {
                 disabled={!building}
                 onChange={(e) => {
                   setLevel(e.target.value);
-                  setSelectedRooms([]);
                   setSelectedZone(null);
                 }}
               >
@@ -5139,6 +5764,149 @@ function NewRequest() {
           </div>
         </div>
       </div>
+
+      {/* Multi-Level Chips Navigation */}
+      {building && levels.length > 0 && (
+        <div style={{ margin: "16px 0", padding: "14px 20px", background: "rgba(30, 41, 59, 0.7)", borderRadius: "12px", border: "1px solid rgba(255, 255, 255, 0.08)", backdropFilter: "blur(6px)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+            <span style={{ fontSize: "13px", fontWeight: 700, color: "#93c5fd", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              🏢 Select Level to View Floor Plan
+            </span>
+            <span style={{ fontSize: "12px", color: "#9ca3af" }}>
+              {selectedRooms.length} room{selectedRooms.length !== 1 ? "s" : ""} selected across {
+                Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean).length
+              } level{Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean).length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            {levels.map((item) => {
+              const isActive = level === item;
+              const countOnLevel = selectedRooms.filter(r => {
+                const parsed = parseRoomToken(r, level);
+                return parsed.level.toLowerCase().trim() === item.toLowerCase().trim();
+              }).length;
+
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  onClick={() => {
+                    setLevel(item);
+                    setSelectedZone(null);
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    padding: "8px 16px",
+                    borderRadius: "8px",
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    transition: "all 0.2s ease",
+                    border: isActive ? "1px solid #3b82f6" : "1px solid rgba(255, 255, 255, 0.12)",
+                    background: isActive ? "rgba(59, 130, 246, 0.25)" : "rgba(255, 255, 255, 0.04)",
+                    color: isActive ? "#60a5fa" : "#d1d5db"
+                  }}
+                >
+                  <span>{item}</span>
+                  {countOnLevel > 0 && (
+                    <span style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      padding: "2px 8px",
+                      borderRadius: "12px",
+                      fontSize: "11px",
+                      fontWeight: 700,
+                      background: isActive ? "#2563eb" : "#10b981",
+                      color: "#ffffff"
+                    }}>
+                      {countOnLevel}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Multi-Level Selected Rooms Breakdown Panel */}
+      {selectedRooms.length > 0 && (
+        <div style={{ marginBottom: "16px", padding: "16px 20px", background: "rgba(17, 24, 39, 0.85)", borderRadius: "12px", border: "1px solid rgba(59, 130, 246, 0.3)" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px", borderBottom: "1px solid rgba(255, 255, 255, 0.08)", paddingBottom: "10px" }}>
+            <h4 style={{ margin: 0, color: "#fff", fontSize: "14px", fontWeight: 700, display: "flex", alignItems: "center", gap: "8px" }}>
+              <span>Selected Locations Breakdown</span>
+              <span style={{ fontSize: "11px", padding: "2px 8px", borderRadius: "10px", background: "rgba(59, 130, 246, 0.2)", color: "#60a5fa", border: "1px solid rgba(59, 130, 246, 0.3)" }}>
+                {selectedRooms.length} Total Room{selectedRooms.length !== 1 ? "s" : ""}
+              </span>
+            </h4>
+            <button
+              type="button"
+              onClick={() => setSelectedRooms([])}
+              style={{ background: "none", border: "none", color: "#ef4444", fontSize: "12px", cursor: "pointer", fontWeight: 600 }}
+            >
+              Clear All Selections
+            </button>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            {Object.entries(
+              selectedRooms.reduce((acc, token) => {
+                const parsed = parseRoomToken(token, level);
+                const lName = parsed.level || "Unspecified Level";
+                if (!acc[lName]) acc[lName] = [];
+                acc[lName].push(token);
+                return acc;
+              }, {})
+            ).map(([lvlName, tokens]) => (
+              <div key={lvlName} style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px", padding: "8px 12px", background: "rgba(255, 255, 255, 0.03)", borderRadius: "8px" }}>
+                <span style={{ fontSize: "12px", fontWeight: 700, color: "#60a5fa", minWidth: "90px" }}>
+                  {lvlName}:
+                </span>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", flex: 1 }}>
+                  {tokens.map((tok) => {
+                    const parsed = parseRoomToken(tok, lvlName);
+                    return (
+                      <span
+                        key={tok}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                          padding: "4px 10px",
+                          borderRadius: "6px",
+                          background: "rgba(59, 130, 246, 0.15)",
+                          border: "1px solid rgba(59, 130, 246, 0.3)",
+                          color: "#e0f2fe",
+                          fontSize: "12px"
+                        }}
+                      >
+                        <span style={{ fontWeight: 600 }}>{parsed.zone}:</span> {parsed.roomName}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedRooms(prev => prev.filter(t => t !== tok))}
+                          style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: "14px", lineHeight: 1, padding: 0 }}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    );
+                  })}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedRooms(prev => prev.filter(t => parseRoomToken(t, level).level.toLowerCase().trim() !== lvlName.toLowerCase().trim()))}
+                  style={{ background: "none", border: "none", color: "#9ca3af", fontSize: "11px", cursor: "pointer" }}
+                >
+                  Remove Level
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {selectedPdf && (
         <div style={{ position: "relative" }}>
@@ -5157,7 +5925,9 @@ function NewRequest() {
                 style={{ height: "46px", padding: "0 32px", fontSize: "15px" }}
                 onClick={() => setIsnewrequestcreated(true)}
               >
-                Continue with {selectedRooms.length} Room{selectedRooms.length > 1 ? "s" : ""} selected →
+                Continue with {selectedRooms.length} Room{selectedRooms.length > 1 ? "s" : ""} selected across {
+                  Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean).length
+                } Level{Array.from(new Set(selectedRooms.map(r => parseRoomToken(r, level).level))).filter(Boolean).length !== 1 ? "s" : ""} →
               </button>
             </div>
           )}

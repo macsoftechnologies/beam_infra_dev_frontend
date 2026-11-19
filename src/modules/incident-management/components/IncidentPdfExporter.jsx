@@ -1,0 +1,1484 @@
+import React, { useRef, useState, useEffect } from "react";
+import html2pdf from "html2pdf.js";
+import { exportIncidentPdf } from "../../../services/incidentService";
+import nneLogoImg from "../../../assets/images/nne_logo.png";
+import projectLogoImg from "../../../assets/images/Logo.jpeg";
+
+/**
+ * IncidentPdfExporter Component
+ * Official Form Viewer Modal & PDF Exporter
+ * Renders the exact backend-generated official PDF format for:
+ * 1. Form 1: Heads-up Notification (1 Hour)
+ * 2. Form 2: Initial Incident Report (24 Hours)
+ * 3. Form 3: Final Incident Investigation Report (7 Days)
+ */
+export function IncidentPdfExporter({ incident, onClose, targetForm = "all" }) {
+  const exportRef = useRef(null);
+  const [activeFormTab, setActiveFormTab] = useState(targetForm || "all");
+  const [pdfBlobUrl, setPdfBlobUrl] = useState(null);
+  const [loadingPdf, setLoadingPdf] = useState(true);
+  const [pdfError, setPdfError] = useState(null);
+
+  const incId = incident?.id || incident?.incident?.id;
+
+  useEffect(() => {
+    if (targetForm) {
+      setActiveFormTab(targetForm);
+    }
+  }, [targetForm]);
+
+  // Handle Escape key to close viewer modal
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        if (onClose) onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const [includeWitnesses, setIncludeWitnesses] = useState(false);
+  const [includeAttachments, setIncludeAttachments] = useState(true);
+
+  // Fetch backend PDF whenever form tab or includeWitnesses changes
+  useEffect(() => {
+    let isMounted = true;
+    let createdUrl = null;
+
+    const fetchBackendPdf = async () => {
+      if (!incId) {
+        setLoadingPdf(false);
+        return;
+      }
+
+      try {
+        setLoadingPdf(true);
+        setPdfError(null);
+        const formKey = activeFormTab === "all" ? "all" : activeFormTab;
+        const blobData = await exportIncidentPdf(incId, formKey, includeWitnesses, includeAttachments);
+
+        if (isMounted) {
+          const blob = new Blob([blobData], { type: "application/pdf" });
+          createdUrl = URL.createObjectURL(blob);
+          setPdfBlobUrl(createdUrl);
+        }
+      } catch (err) {
+        console.warn("Could not load PDF preview directly from backend, using HTML fallback:", err);
+        if (isMounted) {
+          setPdfError("Direct PDF preview unavailable. Displaying form document below.");
+          setPdfBlobUrl(null);
+        }
+      } finally {
+        if (isMounted) {
+          setLoadingPdf(false);
+        }
+      }
+    };
+
+    fetchBackendPdf();
+
+    return () => {
+      isMounted = false;
+      if (createdUrl) {
+        URL.revokeObjectURL(createdUrl);
+      }
+    };
+  }, [incId, activeFormTab, includeWitnesses, includeAttachments]);
+
+  const hu = incident.headsUp || incident.headsup || {};
+  const ir = incident.initialReport || incident.initial_report || {};
+  const inv = incident.investigation || incident.incident_investigation || {};
+
+  const isTruthy = (v) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+
+  const formatTimestamp = (dStr) => {
+    if (!dStr) return "—";
+    try {
+      const d = new Date(dStr);
+      if (isNaN(d.getTime())) return String(dStr).replace('T', ' ');
+      return d.toLocaleString('en-GB', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false
+      }).replace(',', '');
+    } catch (e) {
+      return String(dStr);
+    }
+  };
+
+  // Step 1: Was waiver checked at Heads-Up?
+  const isStep1Waived = isTruthy(hu.noFurtherInvestigation) || isTruthy(hu.no_further_investigation);
+  let step1WaiverUser = "";
+  let step1WaiverTime = null;
+  if (isStep1Waived) {
+    step1WaiverTime = hu.approvedTime || hu.approved_time || hu.updatedTime || hu.updated_time || hu.submittedTime || hu.submitted_time;
+    step1WaiverUser = hu.approvedBy
+      ? `${hu.approvedBy}${hu.approverRole && !hu.approvedBy.includes(hu.approverRole) ? ` (${hu.approverRole})` : ''}`
+      : (hu.approverRole || hu.approver_role || hu.submittedBy || 'Site HSE Lead');
+  }
+  const step1WaiverFormattedDate = step1WaiverTime ? formatTimestamp(step1WaiverTime) : "—";
+
+  // Step 2: Was waiver checked at Initial Report?
+  const isStep2Waived = isTruthy(ir.noFurtherInvestigation) || isTruthy(ir.no_further_investigation) ||
+    (!isStep1Waived && (isTruthy(incident.noFurtherInvestigation) || isTruthy(incident.no_further_investigation)));
+  let step2WaiverUser = "";
+  let step2WaiverTime = null;
+  if (isStep2Waived) {
+    step2WaiverTime = ir.approvedTime || ir.approved_time || ir.updatedTime || ir.updated_time || ir.submittedTime || ir.submitted_time || incident.closedTime || incident.closed_time;
+    step2WaiverUser = ir.approvedBy
+      ? `${ir.approvedBy}${ir.approverRole && !ir.approvedBy.includes(ir.approverRole) ? ` (${ir.approverRole})` : ''}`
+      : (ir.approverRole || ir.approver_role || ir.submittedBy || incident.closedBy || incident.closed_by || 'Site HSE Approver');
+
+    if (!step2WaiverTime && (incident.closureHistory || incident.closure_history)) {
+      let ch = incident.closureHistory || incident.closure_history;
+      if (typeof ch === 'string') {
+        try { ch = JSON.parse(ch); } catch (e) { }
+      }
+      if (Array.isArray(ch) && ch.length > 0) {
+        const lastC = ch[ch.length - 1];
+        step2WaiverTime = lastC.closedTime || lastC.closed_time || lastC.timestamp;
+        if (!step2WaiverUser) step2WaiverUser = lastC.closedBy || lastC.closed_by;
+      }
+    }
+  }
+  const step2WaiverFormattedDate = step2WaiverTime ? formatTimestamp(step2WaiverTime) : "—";
+
+  // Overall waiver status
+  const isNoFurtherInvestigation = isStep1Waived || isStep2Waived;
+
+  const hasHeadsUp = true;
+  const hasInitialReport = Boolean(
+    ir && (
+      (ir.submittedBy && ir.submittedBy !== "User") ||
+      ir.signature ||
+      ir.submittedTime ||
+      (ir.injuredPersonName && String(ir.injuredPersonName).trim().length > 0) ||
+      ir.id ||
+      (incident.stage === 'INITIAL_REPORT' || incident.stage === 'INVESTIGATION' || incident.stage === 'CLOSED')
+    )
+  );
+  const hasInvestigation = !isNoFurtherInvestigation && Boolean(
+    inv && (
+      (inv.problemStatement && String(inv.problemStatement).trim().length > 0) ||
+      (inv.problem && String(inv.problem).trim().length > 0) ||
+      (inv.investigationDetails && String(inv.investigationDetails).trim().length > 0) ||
+      (inv.reviewedBy && String(inv.reviewedBy).trim().length > 0) ||
+      (inv.approvedBy && String(inv.approvedBy).trim().length > 0) ||
+      (inv.submittedBy && inv.submittedBy !== "User" && inv.submittedBy !== "Investigator") ||
+      (Array.isArray(inv.signatures) && inv.signatures.length > 0 && inv.signatures.some(s => s && s.name && s.name !== "HSE Lead" && s.name !== "User"))
+    )
+  );
+
+  let includeForm1 = false;
+  let includeForm2 = false;
+  let includeForm3 = false;
+
+  if (activeFormTab === 'headsUp' || activeFormTab === '1') {
+    includeForm1 = true;
+  } else if (activeFormTab === 'initialReport' || activeFormTab === '2') {
+    includeForm2 = true;
+  } else if (activeFormTab === 'investigation' || activeFormTab === '3') {
+    includeForm3 = !isNoFurtherInvestigation;
+  } else {
+    includeForm1 = true;
+    includeForm2 = hasInitialReport;
+    includeForm3 = !isNoFurtherInvestigation && hasInvestigation;
+  }
+
+  if (isNoFurtherInvestigation) {
+    includeForm3 = false;
+  }
+
+  let p1 = 0, p2 = 0, p3 = 0, pageCounter = 0;
+  if (includeForm1) { pageCounter++; p1 = pageCounter; }
+  if (includeForm2) { pageCounter++; p2 = pageCounter; }
+  if (includeForm3) { pageCounter++; p3 = pageCounter; }
+  const totalPages = pageCounter;
+
+  // Heads-Up Categories (Form 1)
+  const huRawCategories = [
+    ...(hu?.categories || []),
+    hu?.category || "",
+  ].filter(Boolean);
+
+  if (huRawCategories.length === 0) {
+    if (!hasInitialReport && incident?.categories && Array.isArray(incident.categories)) {
+      huRawCategories.push(...incident.categories);
+    } else if (!hasInitialReport && incident?.category) {
+      huRawCategories.push(incident.category);
+    }
+  }
+
+  const hasEnvHeadsUp = Boolean(
+    hu?.isEnvironmental ||
+    (Array.isArray(hu?.spillType) && hu.spillType.length > 0) ||
+    (typeof hu?.spillType === 'string' && hu.spillType.trim().length > 0) ||
+    (hu?.spillSubstance && String(hu.spillSubstance).trim().length > 0) ||
+    (hu?.spillCause && String(hu.spillCause).trim().length > 0)
+  );
+  if (hasEnvHeadsUp && !huRawCategories.some(c => String(c).toLowerCase().includes("environment"))) {
+    huRawCategories.push("Environmental Incident");
+  }
+
+  const hasPropHeadsUp = Boolean(
+    hu?.propertyDamaged ||
+    (hu?.propertyDamageDetails && typeof hu.propertyDamageDetails === 'object' && Object.keys(hu.propertyDamageDetails).length > 0)
+  );
+  if (hasPropHeadsUp && !huRawCategories.some(c => String(c).toLowerCase().includes("property"))) {
+    huRawCategories.push("Property Damage");
+  }
+
+  const huCatsStr = huRawCategories.map(c => String(c).toLowerCase());
+  const isHeadsUpCategory = (catName) => {
+    const lower = catName.toLowerCase();
+    if (lower === 'loss time' || lower === 'lost time') {
+      return huCatsStr.some(c => c.includes('loss time') || c.includes('lost time') || c.includes('lti'));
+    }
+    return huCatsStr.some(c => c.includes(lower));
+  };
+
+  // Initial Report Categories (Form 2)
+  const irRawCategories = [
+    ...(ir?.categories || []),
+    ir?.category || "",
+  ].filter(Boolean);
+
+  const hasEnvInitial = Boolean(
+    (ir?.environmentalDetails && typeof ir.environmentalDetails === 'object' && Object.keys(ir.environmentalDetails).length > 0) ||
+    ir?.spillSubstance
+  );
+  if (hasEnvInitial && !irRawCategories.some(c => String(c).toLowerCase().includes("environment"))) {
+    irRawCategories.push("Environmental Incident");
+  }
+
+  const hasPropInitial = Boolean(
+    ir?.propertyDamageDetails && typeof ir.propertyDamageDetails === 'object' && Object.keys(ir.propertyDamageDetails).length > 0
+  );
+  if (hasPropInitial && !irRawCategories.some(c => String(c).toLowerCase().includes("property"))) {
+    irRawCategories.push("Property Damage");
+  }
+
+  if (irRawCategories.length === 0) {
+    if (incident?.categories && Array.isArray(incident.categories)) {
+      irRawCategories.push(...incident.categories);
+    } else if (incident?.category) {
+      irRawCategories.push(incident.category);
+    }
+  }
+
+  const standardCats = [
+    'near miss',
+    'no treatment',
+    'first aid',
+    'medical treatment',
+    'restricted work',
+    'loss time',
+    'lost time',
+    'permanent disability',
+    'fatality',
+    'occupational illness',
+    'environmental',
+    'property damage'
+  ];
+  const initialOtherCustomCats = Array.from(new Set(irRawCategories.filter(c => {
+    const lower = String(c).toLowerCase().trim();
+    if (!lower) return false;
+    return !standardCats.some(std => lower.includes(std));
+  })));
+
+  const irCatsStr = irRawCategories.map(c => String(c).toLowerCase());
+  const isInitialCategory = (catName) => {
+    const lower = catName.toLowerCase().trim();
+    if (lower === 'loss time' || lower === 'lost time') {
+      return irCatsStr.some(c => c.includes('loss time') || c.includes('lost time') || c.includes('lti'));
+    }
+    if (lower === 'no treatment' || lower === 'no treatment injury') {
+      return irCatsStr.some(c => c === 'no treatment' || c === 'no treatment injury' || c.includes('no treatment'));
+    }
+    if (lower === 'medical treatment' || lower === 'medical treatment injury') {
+      return irCatsStr.some(c => (c === 'medical treatment' || c === 'medical treatment injury' || c.includes('medical treatment')) && !c.includes('no treatment'));
+    }
+    if (lower === 'first aid' || lower === 'first aid injury') {
+      return irCatsStr.some(c => c.includes('first aid'));
+    }
+    if (lower === 'restricted work' || lower === 'restricted work injury') {
+      return irCatsStr.some(c => c.includes('restricted work') || c.includes('rwi'));
+    }
+    return irCatsStr.some(c => c.includes(lower));
+  };
+
+  // Initial Report Treatment Provided (Form 2)
+  const irRawTreatments = [];
+  if (ir?.treatmentProvided && Array.isArray(ir.treatmentProvided)) {
+    ir.treatmentProvided.forEach(t => {
+      if (Array.isArray(t)) irRawTreatments.push(...t);
+      else if (t) irRawTreatments.push(t);
+    });
+  } else if (ir?.treatmentProvided) {
+    irRawTreatments.push(ir.treatmentProvided);
+  }
+  if (ir?.treatmentPrescribed && !irRawTreatments.includes(ir.treatmentPrescribed)) {
+    irRawTreatments.push(ir.treatmentPrescribed);
+  }
+  if (ir?.medicalTreatmentClass && !irRawTreatments.includes(ir.medicalTreatmentClass)) {
+    irRawTreatments.push(ir.medicalTreatmentClass);
+  }
+
+  const irTreatmentsStr = irRawTreatments.map(t => String(t).toLowerCase());
+  const isInitialTreatment = (treatmentName) => {
+    const lower = treatmentName.toLowerCase().trim();
+    if (lower === 'no treatment') {
+      return irTreatmentsStr.some(t => t === 'no treatment' || t === 'none' || t === 'nil' || t === 'none reported');
+    }
+    if (lower === 'first aid') {
+      return irTreatmentsStr.some(t => t === 'first aid' || t.includes('first aid'));
+    }
+    if (lower === 'medical treatment') {
+      return irTreatmentsStr.some(t => (t === 'medical treatment' || t.includes('medical treatment') || t.includes('medical center') || t.includes('off-site treatment') || t === 'medical') && !t.includes('no treatment'));
+    }
+    if (lower === 'restricted work') {
+      return irTreatmentsStr.some(t => t === 'restricted work' || t.includes('restricted work') || t === 'rwi' || t.includes('light duties'));
+    }
+    if (lower === 'lost time' || lower === 'loss time') {
+      return irTreatmentsStr.some(t => t.includes('lost time') || t.includes('loss time') || t.includes('hospitalization') || t === 'lti');
+    }
+    return irTreatmentsStr.some(t => t.includes(lower));
+  };
+
+  const standardTreatments = ['no treatment', 'first aid', 'medical treatment', 'restricted work', 'lost time', 'loss time', 'hospitalization'];
+  const initialOtherTreatments = Array.from(new Set(irRawTreatments.filter(t => {
+    const lower = String(t).toLowerCase().trim();
+    if (!lower) return false;
+    return !standardTreatments.some(std => lower.includes(std));
+  })));
+
+  // Overall categories
+  const allIncidentCats = Array.from(new Set([...huCatsStr, ...irCatsStr]));
+  const isCategory = (catName) => isHeadsUpCategory(catName);
+
+  const isEnv = (includeForm1 && !includeForm2 && !includeForm3)
+    ? huCatsStr.some(c => c.includes("environment"))
+    : (irCatsStr.some(c => c.includes("environment")) || huCatsStr.some(c => c.includes("environment")));
+  const isPropertyDamage = (includeForm1 && !includeForm2 && !includeForm3)
+    ? huCatsStr.some(c => c.includes("property"))
+    : (irCatsStr.some(c => c.includes("property")) || huCatsStr.some(c => c.includes("property")));
+
+  const envDetails = ir?.environmentalDetails || incident?.environmentalDetails || hu?.environmentalDetails || {};
+  const propDetails = ir?.propertyDamageDetails || incident?.propertyDamageDetails || hu?.propertyDamageDetails || {};
+
+  const handleDownloadPdf = async () => {
+    const caseName = incident.caseNumber || incident.id || "Incident";
+    const suffix = activeFormTab === 'headsUp' || activeFormTab === '1' ? '_Form1_HeadsUp'
+      : activeFormTab === 'initialReport' || activeFormTab === '2' ? '_Form2_InitialReport'
+        : activeFormTab === 'investigation' || activeFormTab === '3' ? '_Form3_Investigation'
+          : '_All_Forms_Report';
+
+    // If we have the backend PDF blob URL, download it directly
+    if (pdfBlobUrl) {
+      const link = document.createElement("a");
+      link.href = pdfBlobUrl;
+      link.setAttribute("download", `${caseName}${suffix}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      return;
+    }
+
+    // Otherwise use html2pdf fallback
+    const element = exportRef.current;
+    if (!element) return;
+
+    const opt = {
+      margin: [8, 8, 8, 8],
+      filename: `${caseName}${suffix}.pdf`,
+      image: { type: "jpeg", quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true, logging: false },
+      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+      pagebreak: { mode: ["css", "legacy"] },
+    };
+
+    html2pdf().set(opt).from(element).save();
+  };
+
+  const handlePrint = () => {
+    if (pdfBlobUrl) {
+      const printWin = window.open(pdfBlobUrl);
+      if (printWin) {
+        printWin.focus();
+        printWin.print();
+        return;
+      }
+    }
+    window.print();
+  };
+
+  // Helper for NNE Header
+  const renderNneHeader = (pageTitle, currentFormNo) => (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "2px solid #0f172a", paddingBottom: 10, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <img src={projectLogoImg} alt="Project Logo" style={{ height: 38, objectFit: "contain" }} />
+        </div>
+        <div style={{ textAlign: "right", display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+          <img src={nneLogoImg} alt="NNE Logo" style={{ height: 38, objectFit: "contain" }} />
+        </div>
+      </div>
+
+      <h1 style={{ fontSize: 20, fontWeight: 800, color: "#0f172a", margin: "8px 0 4px", letterSpacing: "-0.5px" }}>{pageTitle}</h1>
+      <div style={{ fontSize: 10, color: "#475569", marginBottom: 12 }}>
+        Project: <strong style={{ color: "#0f172a" }}>{incident.project || hu.project || "M3 Infrastructure"}</strong> &nbsp;|&nbsp;
+        Project ID: <strong style={{ color: "#0f172a" }}>{incident.projectNo || "M3 Infrastructure-001"}</strong> &nbsp;|&nbsp;
+        System No: <strong style={{ color: "#0f172a" }}>{incident.caseNumber || (incident.id ? `INC-2026-${String(incident.id).padStart(4, '0')}` : "—")}</strong>
+      </div>
+    </div>
+  );
+
+  const renderNneFooter = (pageNo, total = totalPages) => (
+    <div style={{ marginTop: 24, paddingTop: 8, borderTop: "1px solid #cbd5e1", display: "flex", justifyContent: "space-between", fontSize: 8.5, color: "#64748b" }}>
+      <div>
+        Template: TPL-138/NNE Project Template - Word/ 1.0 &nbsp;|&nbsp; Doc No: DPT-00049
+      </div>
+      <div>
+        © NNE A/S &nbsp;|&nbsp; Form {pageNo} of {total}
+      </div>
+    </div>
+  );
+
+  // Lifecycle Logs (Reopen and Closure)
+  let reopenList = [];
+  let closureList = [];
+
+  if (typeof incident.reopenLogs === 'string') {
+    try { reopenList = JSON.parse(incident.reopenLogs); } catch (e) { }
+  } else if (Array.isArray(incident.reopenLogs)) {
+    reopenList = incident.reopenLogs;
+  }
+
+  if (typeof incident.closureHistory === 'string') {
+    try { closureList = JSON.parse(incident.closureHistory); } catch (e) { }
+  } else if (Array.isArray(incident.closureHistory)) {
+    closureList = incident.closureHistory;
+  }
+
+  // Synthesize current closure if closed but not yet in closureHistory
+  if (incident.closedBy || incident.closedTime) {
+    const hasMatchingClosure = closureList.some(
+      (c) => c.closedTime && incident.closedTime && new Date(c.closedTime).getTime() === new Date(incident.closedTime).getTime()
+    );
+    if (!hasMatchingClosure) {
+      closureList.push({
+        action: 'Closed',
+        status: 'CLOSED',
+        closedBy: incident.closedBy || 'Site HSE Lead / Admin',
+        closedTime: incident.closedTime || incident.updatedTime,
+        closureComments: incident.closureComments || '',
+        signature: incident.closureSignature || null,
+        timestamp: incident.closedTime || incident.updatedTime,
+      });
+    }
+  }
+
+  const allLifecycleEvents = [
+    ...reopenList.map((r, idx) => ({
+      eventType: 'REOPENED',
+      actionText: 'Incident Reopened',
+      badgeBg: '#fef3c7',
+      badgeColor: '#b45309',
+      userName: r.reopenedBy || 'Department User',
+      role: r.role || 'Department User / HSE',
+      remarks: r.reason || 'Reopened for investigation & corrective actions',
+      timestamp: r.reopenedTime || r.timestamp || r.date,
+      signature: r.signature,
+      cycle: r.cycle || (idx + 1),
+    })),
+    ...closureList.map((c, idx) => ({
+      eventType: 'CLOSED',
+      actionText: 'Incident Closed',
+      badgeBg: '#d1fae5',
+      badgeColor: '#065f46',
+      userName: c.closedBy || 'Site HSE Lead / Admin',
+      role: c.role || 'Site HSE Lead',
+      remarks: c.closureComments || 'All corrective actions completed and verified.',
+      timestamp: c.closedTime || c.timestamp,
+      signature: c.signature || c.closureSignature,
+      cycle: c.cycle || (idx + 1),
+    })),
+  ].sort((a, b) => {
+    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return ta - tb;
+  });
+
+  const renderLifecycleTable = () => {
+    if (allLifecycleEvents.length === 0) return null;
+    return (
+      <div style={{ marginTop: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>
+          Incident Lifecycle History (Reopen & Closure Records)
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9 }}>
+          <thead>
+            <tr style={{ background: "#0f172a", color: "#fff" }}>
+              <th style={{ padding: "5px 6px", border: "1px solid #0f172a", textAlign: "left", width: "18%" }}>Action / Stage</th>
+              <th style={{ padding: "5px 6px", border: "1px solid #0f172a", textAlign: "left", width: "22%" }}>Performed By / Role</th>
+              <th style={{ padding: "5px 6px", border: "1px solid #0f172a", textAlign: "left", width: "18%" }}>Date & Time</th>
+              <th style={{ padding: "5px 6px", border: "1px solid #0f172a", textAlign: "left", width: "42%" }}>Reason / Closure Remarks</th>
+            </tr>
+          </thead>
+          <tbody>
+            {allLifecycleEvents.map((ev, idx) => (
+              <tr key={idx} style={{ background: idx % 2 === 0 ? "#f8fafc" : "#ffffff" }}>
+                <td style={{ padding: "5px 6px", border: "1px solid #cbd5e1" }}>
+                  <span style={{
+                    display: "inline-block",
+                    padding: "2px 6px",
+                    borderRadius: 4,
+                    fontSize: 8.5,
+                    fontWeight: 700,
+                    background: ev.badgeBg,
+                    color: ev.badgeColor
+                  }}>
+                    {ev.actionText} {ev.cycle ? `(Cycle ${ev.cycle})` : ""}
+                  </span>
+                </td>
+                <td style={{ padding: "5px 6px", border: "1px solid #cbd5e1" }}>
+                  <div style={{ fontWeight: 600 }}>{ev.userName}</div>
+                  <div style={{ fontSize: 8, color: "#64748b" }}>{ev.role}</div>
+                </td>
+                <td style={{ padding: "5px 6px", border: "1px solid #cbd5e1" }}>
+                  {ev.timestamp ? new Date(ev.timestamp).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" }) : "N/A"}
+                </td>
+                <td style={{ padding: "5px 6px", border: "1px solid #cbd5e1", whiteSpace: "pre-wrap" }}>
+                  {ev.remarks}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  const Checkbox = ({ checked, label }) => (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: 12, marginBottom: 4, fontSize: 10 }}>
+      <span
+        style={{
+          display: "inline-block",
+          width: 12,
+          height: 12,
+          border: "1.5px solid #0f172a",
+          borderRadius: 2,
+          textAlign: "center",
+          lineHeight: "10px",
+          fontSize: 9,
+          fontWeight: 900,
+          background: checked ? "#0f172a" : "#fff",
+          color: checked ? "#fff" : "transparent",
+        }}
+      >
+        ✓
+      </span>
+      <span>{label}</span>
+    </span>
+  );
+
+  return (
+    <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(15,23,42,0.9)", zIndex: 10000099, display: "flex", flexDirection: "column" }}>
+      {/* Top Modal Navigation Bar */}
+      <div style={{ background: "#0f172a", color: "#fff", padding: "12px 24px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px", borderBottom: "1px solid #334155", boxShadow: "0 4px 12px rgba(0,0,0,0.35)", position: "relative", zIndex: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
+          {/* Prominent Back Button */}
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              background: "#2563eb",
+              color: "#fff",
+              border: "none",
+              padding: "8px 18px",
+              borderRadius: "6px",
+              fontSize: "13.5px",
+              fontWeight: 700,
+              cursor: "pointer",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              boxShadow: "0 2px 4px rgba(0,0,0,0.25)",
+              transition: "all 0.15s ease"
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="19" y1="12" x2="5" y2="12"></line>
+              <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            Back to Incident Details
+          </button>
+
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, display: "flex", alignItems: "center", gap: "8px" }}>
+              {activeFormTab === 'headsUp' || activeFormTab === '1' ? 'Form 1: Heads-Up Notification'
+                : activeFormTab === 'initialReport' || activeFormTab === '2' ? 'Form 2: Initial Incident Report'
+                  : activeFormTab === 'investigation' || activeFormTab === '3' ? 'Form 3: Incident Investigation Report'
+                    : 'Official Incident Document Viewer'}
+            </h3>
+            <p style={{ margin: 0, fontSize: 11.5, color: "#94a3b8" }}>
+              {incident.caseNumber || (incident.id ? `INC-2026-${String(incident.id).padStart(4, '0')}` : "Incident")} — {incident.title || hu.title || "Details"}
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          {(activeFormTab === 'all' || activeFormTab === 'investigation' || activeFormTab === '3') && (
+            <>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12.5px", color: "#e2e8f0", cursor: "pointer", background: "#1e293b", padding: "6px 12px", borderRadius: "6px", border: "1px solid #475569" }}>
+                <input
+                  type="checkbox"
+                  checked={includeAttachments}
+                  onChange={(e) => setIncludeAttachments(e.target.checked)}
+                  style={{ cursor: "pointer", accentColor: "#2563eb", width: 15, height: 15 }}
+                />
+                <span style={{ fontWeight: 600 }}>Include Attachments</span>
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12.5px", color: "#e2e8f0", cursor: "pointer", background: "#1e293b", padding: "6px 12px", borderRadius: "6px", border: "1px solid #475569" }}>
+                <input
+                  type="checkbox"
+                  checked={includeWitnesses}
+                  onChange={(e) => setIncludeWitnesses(e.target.checked)}
+                  style={{ cursor: "pointer", accentColor: "#2563eb", width: 15, height: 15 }}
+                />
+                <span style={{ fontWeight: 600 }}>Include Witness Statements</span>
+              </label>
+            </>
+          )}
+          <button
+            onClick={handleDownloadPdf}
+            style={{ background: "#10b981", color: "#fff", border: "none", padding: "8px 16px", borderRadius: 6, fontWeight: 700, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+            Download PDF
+          </button>
+          <button
+            onClick={handlePrint}
+            style={{ background: "#475569", color: "#fff", border: "none", padding: "8px 14px", borderRadius: 6, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+          >
+            Print
+          </button>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", color: "#cbd5e1", border: "1px solid #64748b", padding: "8px 12px", borderRadius: 6, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+          >
+            ✕ Close
+          </button>
+        </div>
+      </div>
+
+      {/* Form Switcher Tabs Bar */}
+      <div style={{ background: "#1e293b", padding: "8px 24px", display: "flex", gap: "8px", borderBottom: "1px solid #334155", overflowX: "auto", alignItems: "center" }}>
+        <span style={{ fontSize: "11px", fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em", marginRight: "6px" }}>
+          View Form:
+        </span>
+
+        <button
+          type="button"
+          onClick={() => setActiveFormTab("all")}
+          style={{
+            background: activeFormTab === "all" ? "#2563eb" : "rgba(255,255,255,0.06)",
+            color: activeFormTab === "all" ? "#ffffff" : "#cbd5e1",
+            border: activeFormTab === "all" ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.12)",
+            padding: "5px 12px",
+            borderRadius: "6px",
+            fontSize: "12px",
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.15s ease"
+          }}
+        >
+          📄 All Available Forms (Combined)
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveFormTab("headsUp")}
+          style={{
+            background: activeFormTab === "headsUp" || activeFormTab === "1" ? "#2563eb" : "rgba(255,255,255,0.06)",
+            color: activeFormTab === "headsUp" || activeFormTab === "1" ? "#ffffff" : "#cbd5e1",
+            border: activeFormTab === "headsUp" || activeFormTab === "1" ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.12)",
+            padding: "5px 12px",
+            borderRadius: "6px",
+            fontSize: "12px",
+            fontWeight: 600,
+            cursor: "pointer",
+            transition: "all 0.15s ease"
+          }}
+        >
+          Form 1: Heads-Up (1hr)
+        </button>
+
+        {hasInitialReport && (
+          <button
+            type="button"
+            onClick={() => setActiveFormTab("initialReport")}
+            style={{
+              background: activeFormTab === "initialReport" || activeFormTab === "2" ? "#2563eb" : "rgba(255,255,255,0.06)",
+              color: activeFormTab === "initialReport" || activeFormTab === "2" ? "#ffffff" : "#cbd5e1",
+              border: activeFormTab === "initialReport" || activeFormTab === "2" ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.12)",
+              padding: "5px 12px",
+              borderRadius: "6px",
+              fontSize: "12px",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.15s ease"
+            }}
+          >
+            Form 2: Initial Report (24hr)
+          </button>
+        )}
+
+        {!isNoFurtherInvestigation && hasInvestigation && (
+          <button
+            type="button"
+            onClick={() => setActiveFormTab("investigation")}
+            style={{
+              background: activeFormTab === "investigation" || activeFormTab === "3" ? "#2563eb" : "rgba(255,255,255,0.06)",
+              color: activeFormTab === "investigation" || activeFormTab === "3" ? "#ffffff" : "#cbd5e1",
+              border: activeFormTab === "investigation" || activeFormTab === "3" ? "1px solid #3b82f6" : "1px solid rgba(255,255,255,0.12)",
+              padding: "5px 12px",
+              borderRadius: "6px",
+              fontSize: "12px",
+              fontWeight: 600,
+              cursor: "pointer",
+              transition: "all 0.15s ease"
+            }}
+          >
+            Form 3: Investigation Report (7 days)
+          </button>
+        )}
+
+        {isNoFurtherInvestigation && (
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "6px", fontSize: "11.5px", color: "#34d399", background: "rgba(16, 185, 129, 0.15)", padding: "3px 10px", borderRadius: "6px", border: "1px solid rgba(16, 185, 129, 0.3)" }}>
+            <span>✓</span>
+            <span>No Further Investigation Required (Waived by {isStep2Waived && !isStep1Waived ? step2WaiverUser : step1WaiverUser})</span>
+          </div>
+        )}
+      </div>
+
+      {/* Main Content Area */}
+      <div style={{ flex: 1, overflow: "hidden", background: "#334155", position: "relative" }}>
+        {loadingPdf ? (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", color: "#fff", gap: 16 }}>
+            <div style={{ width: 44, height: 44, border: "4px solid rgba(255,255,255,0.2)", borderTopColor: "#3b82f6", borderRadius: "50%", animation: "spin 0.8s linear infinite" }}></div>
+            <style>{`@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }`}</style>
+            <div style={{ fontSize: 15, fontWeight: 600 }}>Loading Official Form Document...</div>
+          </div>
+        ) : pdfBlobUrl ? (
+          <iframe
+            src={pdfBlobUrl}
+            title="Official Form PDF Preview"
+            style={{ width: "100%", height: "100%", border: "none" }}
+          />
+        ) : (
+          /* HTML Document Fallback with All Form Fields */
+          <div style={{ height: "100%", overflowY: "auto", padding: "24px 0", background: "#e2e8f0" }}>
+            <div
+              ref={exportRef}
+              className="nne-pdf-export-container"
+              style={{
+                width: "210mm",
+                minHeight: "297mm",
+                margin: "0 auto",
+                background: "#ffffff",
+                padding: "15mm",
+                boxShadow: "0 4px 20px rgba(0,0,0,0.15)",
+                fontFamily: "Arial, Helvetica, sans-serif",
+                color: "#0f172a",
+                boxSizing: "border-box",
+              }}
+            >
+              {/* FORM 1: HEADS-UP NOTIFICATION */}
+              {includeForm1 && (
+                <div className="pdf-form-section" style={{ marginBottom: 40 }}>
+                  {renderNneHeader("Heads-up Notification", 1)}
+
+                  <div style={{ fontSize: 10, fontStyle: "italic", color: "#475569", marginBottom: 12 }}>
+                    The following template must be completed within 1 hour of the incident occurrence.
+                  </div>
+
+                  {(hu.lateSubmissionReason || incident.lateSubmissionReason) && (
+                    <div style={{ background: "#fff1f2", border: "1px solid #fecdd3", borderLeft: "4px solid #e11d48", padding: "8px 12px", borderRadius: 4, marginBottom: 12, fontSize: 10 }}>
+                      <strong style={{ color: "#9f1239" }}>⚠️ SLA DEADLINE EXCEEDED (1hr Heads-Up Notification) — Reason for Late Submission:</strong>
+                      <div style={{ color: "#881337", marginTop: 4, fontStyle: "normal" }}>{hu.lateSubmissionReason || incident.lateSubmissionReason}</div>
+                    </div>
+                  )}
+
+                  {/* Project Details */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Project Details</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Project Name:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.project || hu.project || "M3 Infrastructure"}</td>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Case Number:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 700, color: "#0f172a" }}>{incident.caseNumber || (incident.id ? `INC-2026-${String(incident.id).padStart(4, '0')}` : "—")}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Title:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.title || hu.title || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Date of Incident / Occurrence (YYYY-MM-DD):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.date || hu.date || incident.createdTime?.split('T')[0] || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Time of Incident / Occurrence (24hr):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.time || hu.time || "07:30"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Location/Building:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.building || hu.building || incident.location || hu.location || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Floor/Level:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.floor || hu.floor || "Ground Floor"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Specific location:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.specificLocation || hu.specificLocation || incident.location || hu.location || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Contractor(s) involved:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.contractor || hu.contractorsInvolved || hu.contractor || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Further Investigation:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>
+                          {isStep1Waived ? (
+                            <span style={{ color: "#059669" }}>
+                              Not Required (Waived) &bull; Waived by: <strong>{step1WaiverUser}</strong> ({step1WaiverFormattedDate})
+                            </span>
+                          ) : (
+                            <span style={{ color: "#2563eb" }}>Required</span>
+                          )}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Incident Category */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>2. Incident Category</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th colSpan="4" style={{ padding: 6, textAlign: "left", fontSize: 10, fontWeight: 700 }}>Incident Category</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Near Miss")} label="Near Miss" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("No Treatment")} label="No Treatment Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("First Aid")} label="First Aid Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Medical Treatment")} label="Medical Treatment Injury" /></td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Restricted Work")} label="Restricted Work Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Loss Time")} label="Lost Time Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Permanent Disability")} label="Permanent Disability" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Fatality")} label="Fatality" /></td>
+                      </tr>
+                      <tr>
+                        <td colSpan="2" style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Occupational Illness")} label="Occupational Illness" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Environmental")} label="Environmental Incident" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isHeadsUpCategory("Property Damage")} label="Property Damage" /></td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Incident Description */}
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left", fontSize: 10, fontWeight: 700 }}>Incident Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: 8, border: "1px solid #cbd5e1" }}>
+                          <div style={{ fontWeight: 700, marginBottom: 4, color: "#334155" }}>Description of what happened?</div>
+                          <div style={{ minHeight: 40, lineHeight: 1.5 }}>{hu.descriptionWhatHappened || hu.whatHappened || incident.description || "—"}</div>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: 8, border: "1px solid #cbd5e1" }}>
+                          <div style={{ fontWeight: 700, marginBottom: 4, color: "#334155" }}>What is the consequence of this incident?</div>
+                          <div style={{ minHeight: 30, lineHeight: 1.5 }}>{hu.descriptionConsequence || hu.consequence || incident.consequence || "—"}</div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Immediate Actions */}
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left" }}>Immediate Action Taken</th>
+                        <th style={{ padding: 6, textAlign: "left" }}>Responsible</th>
+                        <th style={{ padding: 6, textAlign: "left" }}>Time Implemented</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(hu.immediateActions && Array.isArray(hu.immediateActions) && hu.immediateActions.length > 0) ? (
+                        hu.immediateActions.map((act, i) => (
+                          <tr key={i}>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.action || act.description || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.responsible || act.assignedTo || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.timeImplemented || act.time || act.date || "Immediate"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.correctiveAction || incident.immediateActionTaken || "Cordon off area and perform immediate risk control."}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.reportedBy || "Superadmin"}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Immediate</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "25%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Submitted By:</td>
+                        <td style={{ width: "75%", padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{hu.submittedBy || incident.reportedBy || "Superadmin"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Approved By:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>
+                          {hu.approvedBy
+                            ? `${hu.approvedBy}${hu.approverRole && !hu.approvedBy.includes(hu.approverRole) ? ` (${hu.approverRole})` : ''}`
+                            : hu.reviewedBy || incident.approvedBy || "Site HSE Manager"}
+                        </td>
+                      </tr>
+                      {isStep1Waived && (
+                        <tr>
+                          <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Further Investigation:</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>
+                            <div>
+                              <div style={{ fontWeight: 700, color: "#059669" }}>✓ No Further Investigation Required (Waived)</div>
+                              <div style={{ fontSize: "8.5px", color: "#475569", marginTop: "2px" }}>
+                                <strong>Waived By:</strong> {step1WaiverUser} &nbsp;|&nbsp; <strong>Waived On:</strong> {step1WaiverFormattedDate}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {(!includeForm2 && !includeForm3) && renderLifecycleTable()}
+
+                  {renderNneFooter(p1, totalPages)}
+                </div>
+              )}
+
+              {/* FORM 2: INITIAL INCIDENT REPORT */}
+              {includeForm2 && (
+                <div className="pdf-form-section" style={{ marginBottom: 40 }}>
+                  {includeForm1 && <div className="pdf-page-break" style={{ pageBreakBefore: "always", paddingTop: 20 }}></div>}
+                  {renderNneHeader("Initial Incident Report", p2 || 2)}
+                  <div style={{ fontSize: 10, fontStyle: "italic", color: "#475569", marginBottom: 12 }}>
+                    The following template must be completed as soon as possible and within 24 hours of the incident occurrence.
+                  </div>
+
+                  {ir.lateSubmissionReason && (
+                    <div style={{ background: "#fff1f2", border: "1px solid #fecdd3", borderLeft: "4px solid #e11d48", padding: "8px 12px", borderRadius: 4, marginBottom: 12, fontSize: 10 }}>
+                      <strong style={{ color: "#9f1239" }}>⚠️ SLA DEADLINE EXCEEDED (24hr Initial Incident Report) — Reason for Late Submission:</strong>
+                      <div style={{ color: "#881337", marginTop: 4, fontStyle: "normal" }}>{ir.lateSubmissionReason}</div>
+                    </div>
+                  )}
+
+                  {/* Project Details */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Project Details</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Project Name:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.project || hu.project || "M3 Infrastructure"}</td>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Case Number:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 700, color: "#0f172a" }}>{incident.caseNumber || (incident.id ? `INC-2026-${String(incident.id).padStart(4, '0')}` : "—")}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Title:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.title || hu.title || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Date of Incident / Occurrence (YYYY-MM-DD):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.date || hu.date || incident.createdTime?.split('T')[0] || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Time of Incident / Occurrence (24hr):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.time || hu.time || "07:30"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Location/Building:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.building || hu.building || incident.location || hu.location || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Floor/Level:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.floor || hu.floor || "Ground Floor"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Specific location:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.specificLocation || hu.specificLocation || incident.location || hu.location || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Contractor(s) involved:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.contractor || hu.contractorsInvolved || hu.contractor || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Further Investigation:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>
+                          {isStep2Waived ? (
+                            <span style={{ color: "#059669" }}>
+                              Not Required (Waived) &bull; Waived by: <strong>{step2WaiverUser}</strong> ({step2WaiverFormattedDate})
+                            </span>
+                          ) : (isStep1Waived ? (
+                            <span style={{ color: "#059669" }}>
+                              Not Required (Waived at Step 1 by {step1WaiverUser})
+                            </span>
+                          ) : (
+                            <span style={{ color: "#2563eb" }}>Required (Stage 3 Investigation within 7 days)</span>
+                          ))}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Section B: Incident Category */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Section B. Incident Category</div>
+                  <div style={{ fontSize: 9.5, fontStyle: "italic", color: "#64748b", marginBottom: 6 }}>
+                    Select all that apply. The categorisation may change following the incident investigation.
+                  </div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "25%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Near Miss")} label="Near Miss" /></td>
+                        <td style={{ width: "25%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("No Treatment")} label="No Treatment Injury" /></td>
+                        <td style={{ width: "25%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("First Aid")} label="First Aid Injury" /></td>
+                        <td style={{ width: "25%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Medical Treatment")} label="Medical Treatment Injury" /></td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Restricted Work")} label="Restricted Work Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Loss Time")} label="Lost Time Injury" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Permanent Disability")} label="Permanent Disability" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Fatality")} label="Fatality" /></td>
+                      </tr>
+                      <tr>
+                        <td colSpan="2" style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Occupational Illness")} label="Occupational Illness" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Environmental")} label="Environmental Incident" /></td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialCategory("Property Damage")} label="Property Damage" /></td>
+                      </tr>
+                      {initialOtherCustomCats.length > 0 && (
+                        <tr>
+                          <td colSpan="4" style={{ background: "#f8fafc", padding: "4px 8px", border: "1px solid #cbd5e1" }}>
+                            <span style={{ color: "#475569", fontSize: 8.5, fontWeight: 700, marginRight: 6 }}>Other Categories:</span>
+                            {initialOtherCustomCats.map(c => (
+                              <span key={c} style={{ marginRight: 10 }}>
+                                <span style={{ color: "#0284c7", fontWeight: 700, marginRight: 4 }}>✓</span>
+                                <span style={{ fontWeight: 700 }}>{c}</span>
+                              </span>
+                            ))}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* Treatment Provided */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Treatment Provided</div>
+                  <div style={{ fontSize: 9.5, fontStyle: "italic", color: "#64748b", marginBottom: 6 }}>
+                    Select all that apply. Initial medical or first aid treatment provided.
+                  </div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "20%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialTreatment("No Treatment")} label="No Treatment" /></td>
+                        <td style={{ width: "20%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialTreatment("First Aid")} label="First Aid" /></td>
+                        <td style={{ width: "20%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialTreatment("Medical Treatment")} label="Medical Treatment" /></td>
+                        <td style={{ width: "20%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialTreatment("Restricted Work")} label="Restricted Work" /></td>
+                        <td style={{ width: "20%", padding: 6, border: "1px solid #cbd5e1" }}><Checkbox checked={isInitialTreatment("Lost Time")} label="Lost Time" /></td>
+                      </tr>
+                      {initialOtherTreatments.length > 0 && (
+                        <tr>
+                          <td colSpan="5" style={{ background: "#f8fafc", padding: "4px 8px", border: "1px solid #cbd5e1" }}>
+                            <span style={{ color: "#475569", fontSize: 8.5, fontWeight: 700, marginRight: 6 }}>Other Treatment:</span>
+                            {initialOtherTreatments.map(t => (
+                              <span key={t} style={{ marginRight: 10 }}>
+                                <span style={{ color: "#0284c7", fontWeight: 700, marginRight: 4 }}>✓</span>
+                                <span style={{ fontWeight: 700 }}>{t}</span>
+                              </span>
+                            ))}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* Details of Injured / Affected Person */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Details of Injured / Affected Person</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Person Name:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonName || ir.injuredName || "—"}</td>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Age / Gender:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonAge ? `${ir.injuredPersonAge} yrs` : "—"} {ir.injuredPersonGender ? `(${ir.injuredPersonGender})` : ""}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Employer / Company:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonCompany || incident.contractor || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Job Title / Role:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonJobTitle || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Supervisor:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonSupervisor || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Length of Employment:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.injuredPersonExperience || "—"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Nature of Injury & Medical Treatment */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Nature of Injury & Medical Treatment</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Nature of Injury:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.natureOfInjury || ir.injuryNature || "—"}</td>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Body Part(s) Affected:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{Array.isArray(ir.bodyPartsAffected) ? ir.bodyPartsAffected.join(", ") : ir.bodyPartsAffected || ir.bodyPart || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Treatment Provided:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{Array.isArray(ir.treatmentProvided) ? ir.treatmentProvided.join(", ") : (ir.treatmentProvided || ir.treatmentPrescribed || "—")}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Anticipated Absence:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.anticipatedAbsence || "0 days"}</td>
+                      </tr>
+                      {(ir.easyCode || incident.easyCode || incident?.investigation?.easyCode) && (
+                        <tr>
+                          <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>EASY Code / Number:</td>
+                          <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 700 }}>{ir.easyCode || incident.easyCode || incident?.investigation?.easyCode}</td>
+                        </tr>
+                      )}
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Doctor / Medic:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.treatingDoctor || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Work Capability:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.workCapability || "Fit to work / Under observation"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Description & Damage Details */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Detailed Incident Summary & Findings</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ padding: 8, border: "1px solid #cbd5e1" }}>
+                          <div style={{ fontWeight: 700, marginBottom: 4, color: "#334155" }}>Detailed Description of Event:</div>
+                          <div style={{ minHeight: 40, lineHeight: 1.5 }}>{ir.detailedDescription || ir.description || hu.descriptionWhatHappened || "—"}</div>
+                        </td>
+                      </tr>
+                      {ir.propertyDamageDetails && (
+                        <tr>
+                          <td style={{ padding: 8, border: "1px solid #cbd5e1" }}>
+                            <div style={{ fontWeight: 700, marginBottom: 4, color: "#334155" }}>Property / Equipment Damage Details:</div>
+                            <div style={{ minHeight: 30, lineHeight: 1.5 }}>{typeof ir.propertyDamageDetails === 'object' ? JSON.stringify(ir.propertyDamageDetails) : String(ir.propertyDamageDetails)}</div>
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* Immediate Actions Taken */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Immediate Actions Taken</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left", width: "50%" }}>Immediate Action Taken</th>
+                        <th style={{ padding: 6, textAlign: "left", width: "25%" }}>Responsible</th>
+                        <th style={{ padding: 6, textAlign: "left", width: "25%" }}>Time Implemented</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {((ir.immediateActions && Array.isArray(ir.immediateActions) && ir.immediateActions.length > 0)
+                        ? ir.immediateActions
+                        : (hu.immediateActions && Array.isArray(hu.immediateActions) && hu.immediateActions.length > 0)
+                          ? hu.immediateActions
+                          : []).length > 0 ? (
+                        ((ir.immediateActions && Array.isArray(ir.immediateActions) && ir.immediateActions.length > 0)
+                          ? ir.immediateActions
+                          : hu.immediateActions
+                        ).map((act, i) => (
+                          <tr key={i}>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.action || act.description || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.responsible || act.assignedTo || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.timeImplemented || act.time || act.date || "Immediate"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.correctiveAction || incident.immediateActionTaken || "Cordon off area and perform immediate risk control."}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ir.submittedBy || incident.reportedBy || "Superadmin"}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Immediate</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* 5 Submitter & Approver */}
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "25%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Submitted By:</td>
+                        <td style={{ width: "75%", padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{ir.submittedBy || "Site HSE Lead"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Approved By:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>
+                          {ir.approvedBy
+                            ? `${ir.approvedBy}${ir.approverRole && !ir.approvedBy.includes(ir.approverRole) ? ` (${ir.approverRole})` : ''}`
+                            : (ir.approverRole || "Site HSE Manager")}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Further Investigation:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>
+                          {isStep2Waived ? (
+                            <div>
+                              <div style={{ fontWeight: 700, color: "#059669", fontSize: "10px" }}>
+                                ✓ No further investigation required (Incident can be closed after approval)
+                              </div>
+                              <div style={{ fontSize: "9px", color: "#334155", marginTop: "2px" }}>
+                                <strong>Waived By:</strong> {step2WaiverUser} &nbsp;|&nbsp; <strong>Waived On:</strong> {step2WaiverFormattedDate}
+                              </div>
+                            </div>
+                          ) : (isStep1Waived ? (
+                            <div>
+                              <div style={{ fontWeight: 700, color: "#059669", fontSize: "10px" }}>
+                                ✓ No further investigation required (Waived at Heads-Up)
+                              </div>
+                              <div style={{ fontSize: "9px", color: "#334155", marginTop: "2px" }}>
+                                <strong>Waived By:</strong> {step1WaiverUser} &nbsp;|&nbsp; <strong>Waived On:</strong> {step1WaiverFormattedDate}
+                              </div>
+                            </div>
+                          ) : (
+                            <span style={{ fontWeight: 600, color: "#2563eb" }}>
+                              Further investigation required (Stage 3 Investigation within 7 days)
+                            </span>
+                          ))}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {!includeForm3 && renderLifecycleTable()}
+
+                  {renderNneFooter(p2 || 2, totalPages)}
+                </div>
+              )}
+
+              {/* FORM 3: FINAL INVESTIGATION REPORT */}
+              {includeForm3 && (
+                <div className="pdf-form-section">
+                  {(includeForm1 || includeForm2) && <div className="pdf-page-break" style={{ pageBreakBefore: "always", paddingTop: 20 }}></div>}
+                  {renderNneHeader("Final Incident Investigation Report", p3 || 3)}
+                  <div style={{ fontSize: 10, fontStyle: "italic", color: "#475569", marginBottom: 12 }}>
+                    The following template must be completed as soon as possible and within 7 days of the incident occurrence.
+                  </div>
+
+                  {inv.lateSubmissionReason && (
+                    <div style={{ background: "#fff1f2", border: "1px solid #fecdd3", borderLeft: "4px solid #e11d48", padding: "8px 12px", borderRadius: 4, marginBottom: 12, fontSize: 10 }}>
+                      <strong style={{ color: "#9f1239" }}>⚠️ SLA DEADLINE EXCEEDED (7-Day Incident Investigation Report) — Reason for Late Submission:</strong>
+                      <div style={{ color: "#881337", marginTop: 4, fontStyle: "normal" }}>{inv.lateSubmissionReason}</div>
+                    </div>
+                  )}
+
+                  {/* Project Details */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Project & Incident Overview</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Project Name:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.project || hu.project || "M3 Infrastructure"}</td>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Case Number:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 700, color: "#0f172a" }}>{incident.caseNumber || (incident.id ? `INC-2026-${String(incident.id).padStart(4, '0')}` : "—")}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Title:</td>
+                        <td colSpan="3" style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.title || hu.title || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Date of Incident:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{incident.date || hu.date || incident.createdTime?.split('T')[0] || "—"}</td>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Investigation Level:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 700 }}>{inv.investigationLevel || incident.investigationLevel || "L2"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Investigation Team */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Investigation Team Members</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left" }}>Name</th>
+                        <th style={{ padding: 6, textAlign: "left" }}>Role / Designation</th>
+                        <th style={{ padding: 6, textAlign: "left" }}>Company / Organization</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {((Array.isArray(inv.investigationTeam) && inv.investigationTeam.length > 0) || (Array.isArray(inv.team) && inv.team.length > 0)) ? (
+                        (inv.investigationTeam?.length ? inv.investigationTeam : inv.team).map((m, idx) => (
+                          <tr key={idx}>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{m.name || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{m.role || m.designation || "Investigator"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{m.company || incident.contractor || "NNE / Novo Nordisk"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{inv.leadInvestigator || "HSE Lead Investigator"}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Lead Investigator</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>NNE Project Team</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* Chronology / Sequence of Events */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Sequence of Events / Chronology</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left", width: "18%" }}>Time / Date</th>
+                        <th style={{ padding: 6, textAlign: "left" }}>Event / Activity Description</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(Array.isArray(inv.chronologyOfEvents) && inv.chronologyOfEvents.length > 0) ? (
+                        inv.chronologyOfEvents.map((ev, idx) => (
+                          <tr key={idx}>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{ev.time || ev.date || `Step ${idx + 1}`}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{ev.description || ev.event || "—"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{incident.time || "07:30"}</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.descriptionOfEvents || hu.descriptionWhatHappened || incident.description || "Activity commenced under safe work protocol."}</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* Root Cause Analysis (5 Whys) */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Root Cause Analysis (5 Whys / Methodology)</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "15%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Why 1:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.why1 || inv.fiveWhys?.[0] || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Why 2:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.why2 || inv.fiveWhys?.[1] || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Why 3:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.why3 || inv.fiveWhys?.[2] || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Why 4:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.why4 || inv.fiveWhys?.[3] || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Why 5 (Root):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{inv.why5 || inv.fiveWhys?.[4] || inv.rootCause || "—"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Causes Summary */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 6 }}>Direct, Indirect & Root Causes</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "22%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Direct Cause(s):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.directCauses || inv.directCause || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Indirect Cause(s):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{inv.indirectCauses || inv.indirectCause || "—"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Root Cause(s):</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{inv.rootCauses || inv.rootCause || "—"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {/* Corrective Action */}
+                  <div style={{ fontSize: 12, fontWeight: 800, color: "#0f172a", marginBottom: 4 }}>10. Corrective Action</div>
+                  <div style={{ fontSize: 9.5, color: "#b91c1c", marginBottom: 8, fontStyle: "italic", fontWeight: 500 }}>An action taken to eliminate the cause of an incident or nonconformity and prevent it from happening again.</div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 16 }}>
+                    <thead>
+                      <tr style={{ background: "#0f172a", color: "#fff" }}>
+                        <th style={{ padding: 6, textAlign: "left" }}>Action Description</th>
+                        <th style={{ padding: 6, textAlign: "left", width: "20%" }}>Owner</th>
+                        <th style={{ padding: 6, textAlign: "left", width: "16%" }}>Target Date</th>
+                        <th style={{ padding: 6, textAlign: "left", width: "14%" }}>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {((incident.actionItems && Array.isArray(incident.actionItems) && incident.actionItems.length > 0) || (inv.actionItems && Array.isArray(inv.actionItems) && inv.actionItems.length > 0)) ? (
+                        (incident.actionItems || inv.actionItems).map((act, idx) => (
+                          <tr key={idx}>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.action || act.description || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.responsible || act.owner || "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>{act.targetDate ? String(act.targetDate).substring(0, 10) : "—"}</td>
+                            <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{act.status || "PENDING"}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Perform complete site briefing and review safety method statement.</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Site Safety Team</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1" }}>Within 7 Days</td>
+                          <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>COMPLETED</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+
+                  {/* 7 Investigator & Approver */}
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 9.5, marginBottom: 14 }}>
+                    <tbody>
+                      <tr>
+                        <td style={{ width: "25%", background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Investigator:</td>
+                        <td style={{ width: "75%", padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{inv.leadInvestigator || "HSE Investigator"}</td>
+                      </tr>
+                      <tr>
+                        <td style={{ background: "#0f172a", color: "#fff", fontWeight: 700, padding: 6, border: "1px solid #0f172a" }}>Reviewed & Approved:</td>
+                        <td style={{ padding: 6, border: "1px solid #cbd5e1", fontWeight: 600 }}>{inv.approvedBy || "HSE Director"}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  {renderLifecycleTable()}
+
+                  {renderNneFooter(p3 || 3, totalPages)}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

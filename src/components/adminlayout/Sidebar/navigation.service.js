@@ -1,3 +1,10 @@
+// ════════════════════════════════════════════════════════
+//  navigation.service.js
+//  Role-based PTW menus + standalone IM & SO module menus
+// ════════════════════════════════════════════════════════
+
+// ── PERMIT TO WORK: role-based menus ────────────────────
+
 const iconMenu = [
     {
         name: "Dashboard",
@@ -7,7 +14,7 @@ const iconMenu = [
         state: "",
         sub: [
             { name: "Operations Dashboard", state: "user/dashboard" },
-            { name: "Executive Dashboard", state: "user/executive-dashboard" },
+            { name: "Executive Dashboard",  state: "user/executive-dashboard" },
         ],
     },
     {
@@ -39,9 +46,9 @@ const iconMenu = [
         state: "",
         sub: [
             { name: "Buildings", state: "location/buildings", icon: "add_box" },
-            { name: "Floors", state: "location/floors", icon: "add_box" },
-            { name: "Zones", state: "location/zones", icon: "add_box" },
-            { name: "Rooms", state: "location/rooms", icon: "add_box" },
+            { name: "Floors",    state: "location/floors",    icon: "add_box" },
+            { name: "Zones",     state: "location/zones",     icon: "add_box" },
+            { name: "Rooms",     state: "location/rooms",     icon: "add_box" },
         ],
     },
     {
@@ -75,7 +82,7 @@ const iconMenu = [
         icon: "person",
         state: "",
         sub: [
-            { name: "New Request", state: "user/new-request", icon: "add_box" },
+            { name: "New Request",  state: "user/new-request", icon: "add_box" },
             { name: "List Request", state: "user/list-request", icon: "list" },
         ],
     },
@@ -97,7 +104,7 @@ const AdminiconMenu = [
         state: "",
         sub: [
             { name: "Operations Dashboard", state: "user/dashboard" },
-            { name: "Executive Dashboard", state: "user/executive-dashboard" },
+            { name: "Executive Dashboard",  state: "user/executive-dashboard" },
         ],
     },
     {
@@ -129,9 +136,9 @@ const AdminiconMenu = [
         state: "",
         sub: [
             { name: "Buildings", state: "location/buildings", icon: "add_box" },
-            { name: "Floors", state: "location/floors", icon: "add_box" },
-            { name: "Zones", state: "location/zones", icon: "add_box" },
-            { name: "Rooms", state: "location/rooms", icon: "add_box" },
+            { name: "Floors",    state: "location/floors",    icon: "add_box" },
+            { name: "Zones",     state: "location/zones",     icon: "add_box" },
+            { name: "Rooms",     state: "location/rooms",     icon: "add_box" },
         ],
     },
     {
@@ -155,7 +162,7 @@ const AdminiconMenu = [
         icon: "person",
         state: "",
         sub: [
-            { name: "New Request", state: "user/new-request", icon: "add_box" },
+            { name: "New Request",  state: "user/new-request", icon: "add_box" },
             { name: "List Request", state: "user/list-request", icon: "list" },
         ],
     },
@@ -173,7 +180,7 @@ const AdminiconMenu = [
         icon: "settings",
         state: "",
         sub: [
-            { name: "Activity", state: "admin/activity-list", icon: "list" },
+            { name: "Activity",          state: "admin/activity-list",           icon: "list" },
             { name: "Safety Precaution", state: "admin/safety-precautions-list", icon: "list" },
         ],
     },
@@ -211,7 +218,7 @@ const UsericonMenu = [
         icon: "person",
         state: "",
         sub: [
-            { name: "New Request", state: "user/new-request", icon: "add_box" },
+            { name: "New Request",  state: "user/new-request", icon: "add_box" },
             { name: "List Request", state: "user/list-request", icon: "list" },
         ],
     },
@@ -242,7 +249,7 @@ const OperatoriconMenu = [
         icon: "person",
         state: "",
         sub: [
-            { name: "New Request", state: "user/new-request", icon: "add_box" },
+            { name: "New Request",  state: "user/new-request", icon: "add_box" },
             { name: "List Request", state: "user/list-request", icon: "list" },
         ],
     },
@@ -294,7 +301,7 @@ const Operator1iconMenu = [
         icon: "person",
         state: "",
         sub: [
-            { name: "New Request", state: "user/new-request", icon: "add_box" },
+            { name: "New Request",  state: "user/new-request", icon: "add_box" },
             { name: "List Request", state: "user/list-request", icon: "list" },
         ],
     },
@@ -344,22 +351,82 @@ const ObservericonMenu = [
     },
 ];
 
-export function getMenuByRole(role) {
-    let roles = [];
-    if (typeof role === 'string') {
-        roles = role.split(',').map(r => r.trim());
-    } else if (Array.isArray(role)) {
-        roles = role;
-    } else if (role) {
-        roles = [role];
-    }
-    const has = (r) => roles.includes(r);
+// ── INCIDENT MANAGEMENT: standalone sidebar menu ─────────
+export const imNavigationMenu = [
+    {
+        name: "Dashboard",
+        type: "link",
+        tooltip: "IM Dashboard",
+        icon: "ti-layout-dashboard",
+        state: "incident-management/dashboard",
+    },
+    {
+        name: "Incidents",
+        type: "link",
+        tooltip: "All Incidents",
+        icon: "ti-list",
+        state: "incident-management/list",
+    },
+    {
+        name: "Notification Groups",
+        type: "link",
+        tooltip: "Manage Notification Groups",
+        icon: "ti-bell",
+        state: "incident-management/notification-groups",
+        allowedRoles: ["Admin"],
+    },
+];
 
-    if (has("Subcontractor")) return UsericonMenu;
-    if (has("Admin")) return AdminiconMenu;
-    if (has("Department1")) return Operator1iconMenu;
-    if (has("Department")) return OperatoriconMenu;
-    if (has("Observer")) return ObservericonMenu;
+export const soNavigationMenu = [
+    {
+        name: "Dashboard",
+        type: "link",
+        tooltip: "SO Dashboard",
+        icon: "ti-layout-dashboard",
+        state: "safety-observations/dashboard",
+    },
+    {
+        name: "Observations",
+        type: "link",
+        tooltip: "All Observations",
+        icon: "ti-list",
+        state: "safety-observations/list",
+    },
+];
+
+// ── Role resolver ────────────────────────────────────────
+export function getMenuByRole(role) {
+    let targetRole = localStorage.getItem("UserType") || role;
+    try {
+        const storedUser = localStorage.getItem("user");
+        if (storedUser) {
+            const parsed = JSON.parse(storedUser);
+            const ptwRole = parsed?.modules?.find?.(m => 
+                m.moduleId === 'permit-to-work' || m.code === 'permit-to-work' || m.name === 'Permit to Work'
+            )?.userType;
+            if (ptwRole) {
+                targetRole = ptwRole;
+            }
+        }
+    } catch (e) {
+        // ignore
+    }
+
+    let roles = [];
+    if (typeof targetRole === 'string') {
+        roles = targetRole.split(',').map(r => r.trim());
+    } else if (Array.isArray(targetRole)) {
+        roles = targetRole;
+    } else if (targetRole) {
+        roles = [targetRole];
+    }
+    const has = (r) => roles.some(x => String(x).toLowerCase() === String(r).toLowerCase());
+
+    if (has("Admin") || has("SuperAdmin")) return AdminiconMenu;
+    if (has("Department1") || has("Operator1") || has("C&Q") || has("COMM")) return Operator1iconMenu;
+    if (has("Department") || has("Operator") || has("ConM") || has("HSE")) return OperatoriconMenu;
+    if (has("Subcontractor") || has("Contractor")) return UsericonMenu;
+    if (has("Observer"))      return ObservericonMenu;
 
     return [];
 }

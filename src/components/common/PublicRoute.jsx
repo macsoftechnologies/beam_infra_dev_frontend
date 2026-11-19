@@ -53,9 +53,13 @@ export const isTokenValid = () => {
   return false;
 };
 
+import { getPostLoginRedirect, clearPostLoginRedirect } from "../../config/basePath";
+
 const PublicRoute = ({ children }) => {
   if (isTokenValid()) {
-    return <Navigate to="/dashboard" replace />;
+    const target = getPostLoginRedirect() || "/modules";
+    clearPostLoginRedirect();
+    return <Navigate to={target} replace />;
   }
 
   return children;

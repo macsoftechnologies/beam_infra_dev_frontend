@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { login } from "../../../services/authService";
 import { showSuccess, showError } from "../../../components/common/Toast/Toast";
-import { navigateTo, BASE_PATH } from "../../../config/basePath";
+import { navigateTo } from "../../../config/basePath";
 import { isTokenValid } from "../../../components/common/PublicRoute";
 import "./Login.css";
 
@@ -59,13 +59,24 @@ export default function Login() {
           user_id: response.id,
           username: response.username,
           userType: response.userType,
+          typeId: response.typeId,
+          departId: response.departId ?? null,
+          subContId: response.subContId ?? null,
+          subcontractor_id: response.subcontractor_id ?? response.subContId ?? null,
+          subContractorName: response.subContractorName || null,
+          companyName: response.companyName || null,
+          company_name: response.companyName || null,
+          obserId: response.obserId ?? null,
           phonenumber: response.phonenumber,
+          email: response.email,
+          otpNotificationType: response.otpNotificationType || (response.maskedEmail ? "EMAIL" : "SMS"),
           maskedPhone: response.maskedPhone || "",
-          auth_token: response.auth_token
+          maskedEmail: response.maskedEmail || "",
+          moduleAccess: response.moduleAccess || "",
         };
         localStorage.setItem("tempUser", JSON.stringify(tempUser));
 
-        showSuccess("Login successful. OTP sent.");
+        showSuccess(response.message || "Login successful. OTP sent.");
 
         setTimeout(() => {
           setLoading(false);
@@ -101,19 +112,12 @@ export default function Login() {
       </div>
 
       {/* Back Link */}
-      <a
-        href={`${BASE_PATH}/`}
-        onClick={(e) => {
-          e.preventDefault();
-          navigateTo("/");
-        }}
-        className="back-link"
-      >
+      <Link to="/" className="back-link">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M19 12H5M12 19l-7-7 7-7" />
         </svg>
         Back to portal selection
-      </a>
+      </Link>
 
       <main>
         <div className="login-container">
@@ -122,25 +126,25 @@ export default function Login() {
           <div className="panel-left">
             <div className="panel-glow"></div>
             <div className="panel-glow-2"></div>
-            <div className="panel-compass">I</div>
+            <div className="panel-compass">S</div>
 
             <div className="panel-top">
               <div className="ssw-login-brand">
-                  <img
-                    src="/beam-assets/safesite-cap-only.png?v=300"
-                    alt=""
-                    aria-hidden="true"
-                    className="ssw-login-cap"
-                  />
-                  <div className="ssw-login-wordmark">
-                    <span className="ssw-safe">SafeSite</span>
-                    <span className="ssw-works">Works</span>
-                  </div>
+                <img
+                  src="/beam-assets/safesite-cap-only.png?v=300"
+                  alt=""
+                  aria-hidden="true"
+                  className="ssw-login-cap"
+                />
+                <div className="ssw-login-wordmark">
+                  <span className="ssw-safe">SafeSite</span>
+                  <span className="ssw-works">Works</span>
                 </div>
-                <div className="beam20-login-badge">BEAM 2.0</div>
+              </div>
+              <div className="beam20-login-badge">BEAM 2.0</div>
 
-                <div className="panel-badge">
-                <span className="dot"></span>Division 03
+              <div className="panel-badge">
+                <span className="dot"></span>Division 02
               </div>
               <h2 className="panel-title">
                 M3 <span>Infrastructure</span>
@@ -156,10 +160,10 @@ export default function Login() {
           <div className="panel-right">
             <div className="form-eyebrow">Secure Access</div>
             <h1 className="form-heading">
-                  Welcome to
-                  <br />
-                  <span className="ssw-heading-safe">SafeSite</span>
-                  <span className="ssw-heading-works">Works</span>
+              Welcome to
+              <br />
+              <span className="ssw-heading-safe">SafeSite</span>
+              <span className="ssw-heading-works">Works</span>
             </h1>
             <p className="form-subtext">Sign in to your M3 Infrastructure account to continue</p>
 

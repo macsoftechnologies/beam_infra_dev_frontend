@@ -5,12 +5,12 @@ import PdfPolygonViewer from "../../components/PdfPolygonViewer";
 import { showError } from "../../components/common/Toast/Toast";
 
 // Using a direct CDN URL avoids Nginx MIME-type issues with .mjs workers
-// when the app is deployed under a sub-path (e.g. /development/m3infrastructure_frontend/).
+// when the app is deployed under a sub-path (e.g. /m3north_frontend/).
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 const ZOOM_STEP = 0.25;
-const ZOOM_MIN = 0.25;  // 25% – minimum allowed zoom
-const ZOOM_MAX = 3.0;   // 300% – maximum allowed zoom
+const ZOOM_MIN  = 0.25;  // 25% – minimum allowed zoom
+const ZOOM_MAX  = 3.0;   // 300% – maximum allowed zoom
 
 function ZoneModal({
   zone,
@@ -31,35 +31,64 @@ function ZoneModal({
     setSelectedRooms(globalSelectedRooms);
   }, [globalSelectedRooms]);
 
+  const getRoomStatusFromMap = (item) => {
+    if (!item) return null;
+    // Authoritative status: all rooms inside this ZoneModal belong to this zone
+    if (zone && zone.status) return zone.status;
+
+    let rName = "";
+    let zName = "";
+    if (typeof item === "object") {
+      rName = item.name || item.room_name || "";
+      zName = item.zone || (zone ? zone.name : "");
+    } else {
+      const str = String(item);
+      const parts = str.split(":::");
+      if (parts.length === 3) {
+        zName = parts[1];
+        rName = parts[2];
+      } else if (parts.length === 2) {
+        zName = parts[0];
+        rName = parts[1];
+      } else {
+        rName = parts[0];
+        zName = zone ? zone.name : "";
+      }
+    }
+    const cleanZone = (zName || (zone ? zone.name : "") || "").toLowerCase().trim();
+    const cleanKey = rName.toLowerCase().trim();
+
+    if (cleanZone && roomStatusMap && roomStatusMap[`${cleanZone}:::${cleanKey}`]) {
+      return roomStatusMap[`${cleanZone}:::${cleanKey}`];
+    }
+    if (roomStatusMap && roomStatusMap[cleanKey]) {
+      return roomStatusMap[cleanKey];
+    }
+    return null;
+  };
+
   const toggleRoom = (roomName) => {
     if (selectedRooms.includes(roomName)) {
       setSelectedRooms((prev) => prev.filter((r) => r !== roomName));
       return;
     }
 
-    const newRoomStatus = roomStatusMap ? roomStatusMap[roomName.toLowerCase().trim()] : null;
+    const newRoomStatus = getRoomStatusFromMap(roomName) || (zone ? zone.status : null);
     if (newRoomStatus) {
-      const statusLabelMap = {
-        UC: "Construction",
-        C: "Commissioning",
-        HO: "Hand Over",
-      };
-
-      const normNewStatus = String(newRoomStatus).toUpperCase().trim();
-      if (normNewStatus === "HO" || normNewStatus === "HAND OVER") {
-        showError("Cannot select a room in a Hand Over status.");
-        return;
-      }
-
-      const activeStatus = selectedRooms.reduce((status, name) => {
+      const activeStatus = selectedRooms.reduce((status, item) => {
         if (status) return status;
-        return roomStatusMap ? roomStatusMap[name.toLowerCase().trim()] : null;
+        return getRoomStatusFromMap(item);
       }, null);
 
       if (activeStatus && activeStatus !== newRoomStatus) {
+        const statusLabelMap = {
+          UC: "Construction",
+          C: "Commissioning",
+          HO: "Hand Over",
+        };
         const activeLabel = statusLabelMap[activeStatus] || activeStatus;
         const newLabel = statusLabelMap[newRoomStatus] || newRoomStatus;
-        showError(`Cannot select a room in a ${newLabel} status when a room in a ${activeLabel} status is already selected.`);
+        showError(`Cannot select a room in a ${newLabel} zone when a room in a ${activeLabel} zone is already selected.`);
         return;
       }
     }
@@ -100,8 +129,8 @@ function ZoneModal({
   }, [activeTab]);
 
   // Zoom helpers
-  const zoomIn = () => setZoomScale((prev) => Math.min(ZOOM_MAX, parseFloat((prev + ZOOM_STEP).toFixed(2))));
-  const zoomOut = () => setZoomScale((prev) => Math.max(ZOOM_MIN, parseFloat((prev - ZOOM_STEP).toFixed(2))));
+  const zoomIn    = () => setZoomScale((prev) => Math.min(ZOOM_MAX, parseFloat((prev + ZOOM_STEP).toFixed(2))));
+  const zoomOut   = () => setZoomScale((prev) => Math.max(ZOOM_MIN, parseFloat((prev - ZOOM_STEP).toFixed(2))));
   const zoomReset = () => setZoomScale(1.0);
 
   const zoomedWidth = Math.round(viewerWidth * zoomScale);

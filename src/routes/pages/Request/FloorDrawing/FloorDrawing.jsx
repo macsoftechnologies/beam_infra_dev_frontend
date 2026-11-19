@@ -3,6 +3,9 @@ import ZoneModal from "../ZoneModal";
 
 import "./FloorDrawing.css";
 import ZonePolygonViewer from "../../../components/Zonepolygonviewer";
+import { generateLocationMapSnapshot } from "../../../utils/locationMapSnapshot";
+
+import { showError } from "../../../components/common/Toast/Toast";
 
 function FloorDrawing({
   pdf,
@@ -11,12 +14,81 @@ function FloorDrawing({
   selectedRooms = [],
   onRoomsSelected,
   roomStatusMap,
+  onMapSnapshot,
 }) {
   const [selectedZone, setSelectedZone] = useState(null);
   const [hoveredZoneId, setHoveredZoneId] = useState(null);
 
   const containerRef = useRef(null);
   const [viewerWidth, setViewerWidth] = useState(800);
+
+  // Automatically generate high-resolution, clear location map snapshot with exact room highlighting
+  useEffect(() => {
+    if (!pdf || !onMapSnapshot) return;
+    let isCancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const snapshot = await generateLocationMapSnapshot({
+          levelPdf: pdf,
+          zones,
+          selectedRooms,
+          level,
+        });
+        if (!isCancelled && snapshot) {
+          onMapSnapshot(snapshot);
+        }
+      } catch (err) {
+        console.warn("Error generating high-res location map snapshot:", err);
+      }
+    }, 350);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [pdf, zones, selectedRooms, level, onMapSnapshot]);
+
+  const handleZoneClick = (zone) => {
+    if (selectedRooms && selectedRooms.length > 0 && zone && zone.status) {
+      const activeStatus = selectedRooms.reduce((status, item) => {
+        if (status) return status;
+        let rName = "";
+        let zName = "";
+        if (typeof item === "object") {
+          rName = item.name || item.room_name || "";
+          zName = item.zone || "";
+        } else {
+          const str = String(item);
+          const parts = str.split(":::");
+          if (parts.length === 3) {
+            zName = parts[1];
+            rName = parts[2];
+          } else if (parts.length === 2) {
+            zName = parts[0];
+            rName = parts[1];
+          } else {
+            rName = parts[0];
+          }
+        }
+        const cleanZone = (zName || "").toLowerCase().trim();
+        const cleanKey = rName.toLowerCase().trim();
+        if (cleanZone && roomStatusMap && roomStatusMap[`${cleanZone}:::${cleanKey}`]) {
+          return roomStatusMap[`${cleanZone}:::${cleanKey}`];
+        }
+        return roomStatusMap ? roomStatusMap[cleanKey] : null;
+      }, null);
+
+      if (activeStatus && activeStatus !== zone.status) {
+        const statusLabelMap = { UC: "Construction", C: "Commissioning", HO: "Hand Over" };
+        const activeLabel = statusLabelMap[activeStatus] || activeStatus;
+        const newLabel = statusLabelMap[zone.status] || zone.status;
+        showError(`Cannot select Zone ${zone.name} (${newLabel}) when rooms in a ${activeLabel} zone are already selected.`);
+        return;
+      }
+    }
+    setSelectedZone(zone);
+  };
 
   // Measure container width so the Konva stage fills the panel responsively
   useEffect(() => {
@@ -75,6 +147,7 @@ function FloorDrawing({
               zones={zones}
               width={viewerWidth}
               selectedZoneId={selectedZone?.id}
+              selectedRooms={selectedRooms}
               onZoneClick={(zone) => setSelectedZone(zone)}
             />
           </div>
@@ -100,14 +173,42 @@ function FloorDrawing({
                   key={zone.id}
                   className={`zone-card ${hoveredZoneId === zone.id ? "hovered" : ""
                     }`}
-                  onClick={() => setSelectedZone(zone)}
+                  onClick={() => handleZoneClick(zone)}
                   onMouseEnter={() => setHoveredZoneId(zone.id)}
                   onMouseLeave={() => setHoveredZoneId(null)}
                 >
                   <div className="zone-card-top">
                     <span className="zone-card-name">{zone.name}</span>
                     <span className="zone-card-rooms-count">
-                      {roomsCount} Room{roomsCount !== 1 ? "s" : ""}
+                      {(() => {
+                        const countInZone = zone.rooms
+                          ? zone.rooms.filter((r) => {
+                            const rName = (typeof r === "object" ? r.name : r).toLowerCase().trim();
+                            return selectedRooms.some((token) => {
+                              const str = String(token);
+                              const parts = str.split(":::");
+                              const tokenRoomName = parts.pop().toLowerCase().trim();
+                              const tokenZoneName = parts.length > 0 ? parts[parts.length - 1].toLowerCase().trim() : "";
+                              const tokenLevelName = parts.length > 1 ? parts[0].toLowerCase().trim() : "";
+
+                              const matchesRoom = tokenRoomName === rName;
+                              const matchesZone = !tokenZoneName || tokenZoneName === zone.name.toLowerCase().trim();
+                              const matchesLevel = !tokenLevelName || !level || tokenLevelName === level.toLowerCase().trim();
+
+                              return matchesRoom && matchesZone && matchesLevel;
+                            });
+                          }).length
+                          : 0;
+
+                        if (countInZone > 0) {
+                          return (
+                            <span style={{ color: "#10b981", fontWeight: 700, background: "rgba(16, 185, 129, 0.15)", padding: "2px 8px", borderRadius: "12px", border: "1px solid rgba(16, 185, 129, 0.3)" }}>
+                              {countInZone} selected
+                            </span>
+                          );
+                        }
+                        return `${roomsCount} Room${roomsCount !== 1 ? "s" : ""}`;
+                      })()}
                     </span>
                   </div>
 
@@ -147,7 +248,23 @@ function FloorDrawing({
       {selectedZone && (
         <ZoneModal
           zone={selectedZone}
-          selectedRooms={selectedRooms}
+          selectedRooms={selectedRooms
+            .filter(r => {
+              if (typeof r === "string" && r.includes(":::")) {
+                const parts = r.split(":::");
+                if (parts.length === 3) {
+                  const [lName, zName] = parts;
+                  const levelMatch = level ? lName.toLowerCase().trim() === level.toLowerCase().trim() : true;
+                  const zoneMatch = selectedZone ? zName.toLowerCase().trim() === selectedZone.name.toLowerCase().trim() : true;
+                  return levelMatch && zoneMatch;
+                } else if (parts.length === 2) {
+                  const [zName] = parts;
+                  return selectedZone ? zName.toLowerCase().trim() === selectedZone.name.toLowerCase().trim() : true;
+                }
+              }
+              return true;
+            })
+            .map(r => (typeof r === "string" && r.includes(":::") ? r.split(":::").pop() : r))}
           onClose={() => setSelectedZone(null)}
           onConfirm={(rooms) => {
             if (onRoomsSelected) {

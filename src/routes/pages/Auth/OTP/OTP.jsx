@@ -25,14 +25,21 @@ const DIVISIONS = {
   },
 };
 
-const ACTIVE_DIVISION = "infrastructure"; // ← match Login.jsx
+const ACTIVE_DIVISION = "infrastructure"; // ← change to match Login.jsx
 // ────────────────────────────────────────────────────────────────────
 
 const OTP_LENGTH = 6;
+const RESEND_TIMER_SECONDS = 300; // 5 minutes
+
+const formatTimer = (totalSeconds) => {
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+};
 
 export default function OTP() {
   if (isTokenValid()) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to="/modules" replace />;
   }
 
   const tempUserStr = localStorage.getItem("tempUser");
@@ -43,14 +50,14 @@ export default function OTP() {
   useEffect(() => {
     const handleCheck = () => {
       if (isTokenValid()) {
-        navigateTo("/dashboard", true);
+        navigateTo("/modules", true);
       } else if (!localStorage.getItem("tempUser")) {
         navigateTo("/login", true);
       }
     };
 
     if (isTokenValid()) {
-      navigateTo("/dashboard", true);
+      navigateTo("/modules", true);
       return;
     }
     if (!localStorage.getItem("tempUser")) {
@@ -69,13 +76,17 @@ export default function OTP() {
     try { return JSON.parse(localStorage.getItem("tempUser") || "{}"); } catch { return {}; }
   })();
   const maskedPhone = tempUser?.maskedPhone || "";
+  const maskedEmail = tempUser?.maskedEmail || "";
+  const rawOtpType = String(tempUser?.otpNotificationType || "").toUpperCase();
+  const isBothOtp = rawOtpType === "BOTH" || (rawOtpType.includes("EMAIL") && rawOtpType.includes("SMS")) || (Boolean(maskedEmail) && Boolean(maskedPhone) && rawOtpType !== "EMAIL" && rawOtpType !== "SMS" && rawOtpType !== "");
+  const isEmailOnly = rawOtpType === "EMAIL" || (!isBothOtp && !maskedPhone && Boolean(maskedEmail));
 
   const [digits, setDigits] = useState(Array(OTP_LENGTH).fill(""));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [resent, setResent] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
-  const [timer, setTimer] = useState(30);
+  const [timer, setTimer] = useState(RESEND_TIMER_SECONDS);
   const [canResend, setCanResend] = useState(false);
 
   const inputRefs = useRef([]);
@@ -167,20 +178,29 @@ export default function OTP() {
 
       if (response && (response.statusCode === 200 || response.status === true)) {
         // Save token and user details to localStorage
-        const tokenVal = response.access_token || response.token || response.auth_token || response.data?.access_token || response.data?.token;
+        const tokenVal = response.access_token || response.token || response.data?.access_token || response.data?.token;
         if (tokenVal) {
           localStorage.setItem("token", tokenVal);
         }
 
         const activeUser = {
-          id: response.id,
-          username: response.username,
-          role: response.userType, // UserType is the role
-          name: response.username,
-          typeId: response.typeId
+          id: response.id || tempUser.user_id,
+          username: response.username || tempUser.username,
+          role: response.userType || tempUser.userType, // UserType is the role
+          name: response.username || tempUser.username,
+          typeId: response.typeId || tempUser.typeId,
+          departId: response.departId ?? tempUser.departId ?? null,
+          subContId: response.subContId ?? tempUser.subContId ?? null,
+          subcontractor_id: response.subcontractor_id ?? tempUser.subcontractor_id ?? response.subContId ?? tempUser.subContId ?? null,
+          subContractorName: response.subContractorName || tempUser.subContractorName || null,
+          companyName: response.companyName || tempUser.companyName || null,
+          company_name: response.companyName || tempUser.companyName || null,
+          obserId: response.obserId ?? tempUser.obserId ?? null,
+          moduleAccess: response.moduleAccess || tempUser?.moduleAccess || "permit-to-work,incident-management,safety-observations,safety-inspection,spot-checks",
         };
         localStorage.setItem("user", JSON.stringify(activeUser));
-        localStorage.setItem("UserType", response.userType);
+        localStorage.setItem("UserType", activeUser.role);
+        localStorage.setItem("primaryUserType", activeUser.role);
 
         // Clean up tempUser
         localStorage.removeItem("tempUser");
@@ -189,17 +209,18 @@ export default function OTP() {
 
         setTimeout(() => {
           setLoading(false);
-          navigateTo("/dashboard", true);
-        }, 1500);
+          navigateTo("/modules", true);
+        }, 1200);
+
       } else {
         setLoading(false);
-        const errMsg = response?.message || "Invalid OTP code";
+        const errMsg = response?.message || "Invalid OTP code. Please check and try again.";
         setError(errMsg);
         showError(errMsg);
       }
     } catch (err) {
       setLoading(false);
-      const errMsg = err.response?.data?.message || err.message || "An error occurred during verification";
+      const errMsg = err.response?.data?.message || err.message || "Invalid OTP code. Please check and try again.";
       setError(errMsg);
       showError(errMsg);
     }
@@ -209,12 +230,18 @@ export default function OTP() {
     if (!canResend || resendLoading) return;
     const stored = localStorage.getItem("tempUser");
     const tUser = stored ? JSON.parse(stored) : null;
-    if (!tUser) { navigateTo("/login"); return; }
+    if (!tUser) {
+      navigateTo("/login");
+      return;
+    }
     setResendLoading(true);
     try {
+      // Re-trigger login to regenerate and resend OTP
+      // We need stored credentials — but since we don't store password, we call a dedicated resend
+      // Fallback: just show a message directing user to login again
       setResent(true);
       setCanResend(false);
-      setTimer(30);
+      setTimer(RESEND_TIMER_SECONDS);
       setDigits(Array(OTP_LENGTH).fill(""));
       inputRefs.current[0]?.focus();
       showSuccess("Please go back to login to request a new OTP.");
@@ -272,9 +299,21 @@ export default function OTP() {
           </h2>
 
           <p className="otp-instruction">
-            We've sent a <strong>6-digit security code</strong> to your registered
-            phone number{maskedPhone ? <> ending in <strong>{maskedPhone}</strong></> : ""}.
-            Enter it below to authorize this session.
+            We've sent a <strong>6-digit security code</strong> to your registered{" "}
+            {isBothOtp ? (
+              <>
+                email address{maskedEmail ? <> (<strong>{maskedEmail}</strong>)</> : ""} and phone number{maskedPhone ? <> ending in <strong>{maskedPhone}</strong></> : ""}
+              </>
+            ) : isEmailOnly ? (
+              <>
+                email address{maskedEmail ? <> (<strong>{maskedEmail}</strong>)</> : ""}
+              </>
+            ) : (
+              <>
+                phone number{maskedPhone ? <> ending in <strong>{maskedPhone}</strong></> : ""}
+              </>
+            )}
+            . Enter it below to authorize this session.
           </p>
 
           {/* Progress bar */}
@@ -354,7 +393,7 @@ export default function OTP() {
               </button>
             ) : (
               <span className="resend-timer">
-                Resend in <strong>{timer}s</strong>
+                Resend in <strong>{formatTimer(timer)}</strong>
               </span>
             )}
           </div>

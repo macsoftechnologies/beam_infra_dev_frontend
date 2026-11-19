@@ -22,6 +22,66 @@ export const parseUTCToDate = (dateStr) => {
 };
 
 /**
+ * Parses a YYYY-MM-DD date string and HH:mm(:ss) time string as Europe/Copenhagen local time,
+ * returning the corresponding UTC Date object regardless of the browser's local timezone.
+ */
+export const parseCopenhagenDateTime = (dateStr, timeStr = "00:00") => {
+  if (!dateStr) return null;
+  const dateParts = String(dateStr).trim().split("-").map(Number);
+  if (dateParts.length !== 3 || dateParts.some(isNaN)) return null;
+  const [year, month, day] = dateParts;
+
+  const cleanTime = String(timeStr || "00:00").trim();
+  const timeParts = cleanTime.split(":").map(Number);
+  const hour = Number.isFinite(timeParts[0]) ? timeParts[0] : 0;
+  const minute = Number.isFinite(timeParts[1]) ? timeParts[1] : 0;
+  const second = Number.isFinite(timeParts[2]) ? timeParts[2] : 0;
+
+  const targetUtcGuess = Date.UTC(year, month - 1, day, hour, minute, second);
+  if (isNaN(targetUtcGuess)) return null;
+
+  const getCphAsUtc = (utcMs) => {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Europe/Copenhagen",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(utcMs));
+    const map = {};
+    for (const p of parts) {
+      if (p.type !== "literal") map[p.type] = Number(p.value);
+    }
+    const h = map.hour === 24 ? 0 : map.hour;
+    return Date.UTC(map.year, map.month - 1, map.day, h, map.minute, map.second);
+  };
+
+  const offset1 = getCphAsUtc(targetUtcGuess) - targetUtcGuess;
+  let resultMs = targetUtcGuess - offset1;
+  const offset2 = getCphAsUtc(resultMs) - resultMs;
+  if (offset2 !== offset1) {
+    resultMs = targetUtcGuess - offset2;
+  }
+  return new Date(resultMs);
+};
+
+/**
+ * Returns the current/provided date as a YYYY-MM-DD string in Europe/Copenhagen timezone.
+ */
+export const getDenmarkDateString = (date = new Date()) => {
+  const copenhagenString = date.toLocaleString('en-US', { timeZone: 'Europe/Copenhagen' });
+  const d = new Date(copenhagenString);
+  const pad = (num) => String(num).padStart(2, '0');
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  return `${year}-${month}-${day}`;
+};
+
+/**
  * Returns the current/provided date as a YYYY-MM-DD HH:mm:ss string in Europe/Copenhagen timezone.
  */
 export const getDenmarkTimeISOString = (date = new Date()) => {
@@ -57,7 +117,7 @@ export const formatToDenmarkDateTime = (dateStr, locale = "en-US", options = {})
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: true,
+    hour12: false,
   };
   
   return date.toLocaleString(finalLocale, {
@@ -65,6 +125,59 @@ export const formatToDenmarkDateTime = (dateStr, locale = "en-US", options = {})
     ...defaultOptions,
     ...finalOptions
   });
+};
+
+/**
+ * Formats a date string (interpreting timezone-less datetime strings as UTC) into Europe/Copenhagen timezone using 24-hour time.
+ * Returns formatted string like "25 Sep 2026 14:30" (or with seconds if includeSeconds is true).
+ */
+export const formatToDenmark24Hour = (dateStr, includeSeconds = false, options = {}) => {
+  if (!dateStr) return "—";
+  const date = parseUTCToDate(dateStr) || new Date(dateStr);
+  if (!date || isNaN(date.getTime())) return String(dateStr) || "—";
+
+  return date.toLocaleString("en-GB", {
+    timeZone: "Europe/Copenhagen",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(includeSeconds ? { second: "2-digit" } : {}),
+    hour12: false,
+    ...options
+  }).replace(",", "");
+};
+
+/**
+ * Formats a date string into { date, time } in Europe/Copenhagen timezone using 24-hour time.
+ * e.g., { date: "25 Sep 2026", time: "14:30" }
+ */
+export const formatToDenmark24HourObj = (dateStr, includeSeconds = false) => {
+  if (!dateStr) return { date: "—", time: "—" };
+  try {
+    const d = parseUTCToDate(dateStr) || new Date(dateStr);
+    if (isNaN(d.getTime())) {
+      const s = String(dateStr);
+      return { date: s.split("T")[0] || s, time: s.split("T")[1] || "—" };
+    }
+    const date = d.toLocaleString("en-GB", {
+      timeZone: "Europe/Copenhagen",
+      day: "2-digit",
+      month: "short",
+      year: "numeric"
+    });
+    const time = d.toLocaleString("en-GB", {
+      timeZone: "Europe/Copenhagen",
+      hour: "2-digit",
+      minute: "2-digit",
+      ...(includeSeconds ? { second: "2-digit" } : {}),
+      hour12: false
+    });
+    return { date, time };
+  } catch (e) {
+    return { date: String(dateStr), time: "—" };
+  }
 };
 
 /**

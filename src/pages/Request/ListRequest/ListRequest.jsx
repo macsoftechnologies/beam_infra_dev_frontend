@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import ReactDOM from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
 import { LOGO_MAP } from "../../../config/logos";
-import { FaEdit, FaEye, FaCopy, FaTrash, FaPlus, FaFilter, FaHistory, FaCheck, FaTimes, FaEllipsisV, FaSearch } from "react-icons/fa";
+import { FaEdit, FaEye, FaCopy, FaTrash, FaPlus, FaFilter, FaHistory, FaCheck, FaTimes, FaEllipsisV, FaSearch, FaColumns, FaUndo } from "react-icons/fa";
 import Swal from "sweetalert2";
 
 const AnalogTimePicker = ({ initialTime, onSave, onCancel }) => {
@@ -212,6 +212,7 @@ import "../../styles/pages.css";
 import "../../../forms/styles/forms.css";
 import { ZONE_MAPPING } from "../../../data/zones";
 import { getDenmarkTimeISOString, formatToDenmarkDateTime } from "../../../utils/dateUtils";
+import { getModuleUserContext, parseModuleAccess, isUserAdmin, getEffectiveRoleForModule } from "../../../utils/modulePermissions";
 
 const getTodayDateString = () => {
   const d = new Date();
@@ -295,109 +296,201 @@ const resolveZoneNameFromRooms = (row) => {
   return "—";
 };
 
+// Helper to resolve Type of Work (Electrical Works, Mechanical Works) from request
+const resolveTypeOfWork = (row) => {
+  if (!row) return "—";
+  if (row.work_type) return row.work_type;
+  if (row.Work_Type) return row.Work_Type;
+  const hasElec = (row.electrical_works && row.electrical_works.length > 0 && row.electrical_works !== "N/A" && row.electrical_works !== "0") ||
+                  row.power_on === 1 || row.power_on === "1";
+  const hasMech = (row.mechanical_works && row.mechanical_works.length > 0 && row.mechanical_works !== "N/A" && row.mechanical_works !== "0") ||
+                  row.pressurization === 1 || row.pressurization === "1";
+  if (hasElec && hasMech) return "Electrical Works, Mechanical Works";
+  if (hasElec) return "Electrical Works";
+  if (hasMech) return "Mechanical Works";
+  return "—";
+};
+
 // Helper to resolve zone objects array [{ Zone_Id: number, zone: string }] from DB zonesList/roomsList & ZONE_MAPPING for copy request
 const resolveZoneObjectsFromRequest = (row, zonesList = [], roomsList = []) => {
   if (!row) return [];
 
-  const roomStr = row.room_names || row.Room_Nos || row.Room_Name || "";
-  const roomsToMatch = String(roomStr)
-    .split(",")
-    .map(r => r.trim().toLowerCase())
-    .filter(Boolean);
-
   const matchedZoneMap = new Map();
+  const targetBuildingId = row.Building_Id ? Number(row.Building_Id) : (row.building_id ? Number(row.building_id) : null);
 
-  // 1. Try matching room names in DB roomsList to find real database zone_id & zone name
-  if (roomsToMatch.length > 0 && roomsList.length > 0) {
-    roomsToMatch.forEach(rNameLower => {
-      const matchedRoom = roomsList.find(r => (r.room_name || "").toLowerCase().trim() === rNameLower);
-      if (matchedRoom && matchedRoom.zone_id) {
-        const zId = Number(matchedRoom.zone_id);
-        const dbZone = zonesList.find(z => String(z.id ?? z.zoneStatusId) === String(zId));
-        const zName = dbZone ? (dbZone.zone || dbZone.zone_name) : (matchedRoom.zone_name || "");
-        if (zName) {
-          matchedZoneMap.set(zName.toLowerCase().trim(), { Zone_Id: zId, zone: String(zName) });
+  // 1. PRIORITISE database Zone_Id / zone object / zone_name already on row
+  const rowZoneIds = [];
+  if (row.Zone_Id) {
+    String(row.Zone_Id).split(',').forEach(idStr => {
+      const num = Number(idStr.trim());
+      if (!isNaN(num) && num > 0) rowZoneIds.push(num);
+    });
+  } else if (Array.isArray(row.zone)) {
+    row.zone.forEach(zItem => {
+      const zId = Number(typeof zItem === 'object' ? (zItem.Zone_Id ?? zItem.zone_id ?? zItem.id) : zItem);
+      if (!isNaN(zId) && zId > 0) rowZoneIds.push(zId);
+    });
+  } else if (row.zone && typeof row.zone === 'object') {
+    const zId = Number(row.zone.id ?? row.zone.Zone_Id ?? row.zone.zone_id);
+    if (!isNaN(zId) && zId > 0) rowZoneIds.push(zId);
+  }
+
+  rowZoneIds.forEach(zId => {
+    const dbZone = zonesList.find(z => 
+      String(z.id ?? z.zoneStatusId) === String(zId) &&
+      (!targetBuildingId || Number(z.building_id || z.build_id) === targetBuildingId)
+    );
+    const zName = dbZone ? (dbZone.zone || dbZone.zone_name) : null;
+    if (zName) {
+      matchedZoneMap.set(zName.toLowerCase().trim(), { Zone_Id: zId, zone: String(zName) });
+    }
+  });
+
+  const explicitZoneName = typeof row.zone_name === "string" && row.zone_name.trim().length > 0 && row.zone_name !== "—"
+    ? row.zone_name.trim()
+    : (typeof row.zone === "string" && row.zone.trim().length > 0 && row.zone !== "—" ? row.zone.trim() : "");
+
+  if (explicitZoneName) {
+    explicitZoneName.split(',').forEach(zStr => {
+      const nameClean = zStr.trim();
+      if (nameClean && !matchedZoneMap.has(nameClean.toLowerCase())) {
+        const dbZone = zonesList.find(z => 
+          (z.zone || z.zone_name || "").toLowerCase().trim() === nameClean.toLowerCase() &&
+          (!targetBuildingId || Number(z.building_id || z.build_id) === targetBuildingId)
+        );
+        const zId = dbZone ? Number(dbZone.id ?? dbZone.zoneStatusId) : null;
+        if (zId) {
+          matchedZoneMap.set(nameClean.toLowerCase(), { Zone_Id: zId, zone: nameClean });
         }
       }
     });
   }
 
-  // 2. Resolve canonical zone names from ZONE_MAPPING using room names
-  const levelKey = row.Room_Type || "";
-  let zonesToSearch = [];
+  // 2. If no zone resolved yet from row.Zone_Id, match room IDs / names in DB roomsList (strictly filtered by Building & Floor)
+  if (matchedZoneMap.size === 0) {
+    const roomStr = row.room_names || row.Room_Nos || row.Room_Name || "";
+    const roomsToMatch = String(roomStr)
+      .split(",")
+      .map(r => r.trim().toLowerCase())
+      .filter(Boolean);
 
-  if (levelKey) {
-    const levelLower = String(levelKey).toLowerCase().trim();
-    const foundKey = Object.keys(ZONE_MAPPING).find(k =>
-      k.toLowerCase().trim().includes(levelLower) || levelLower.includes(k.toLowerCase().trim())
-    );
-    if (foundKey) {
-      zonesToSearch = ZONE_MAPPING[foundKey] || [];
+    const targetBuildingId = row.Building_Id || row.building_id;
+    const targetFloorId = row.Floor_Id || row.fl_id || row.floor_id;
+
+    if (roomsToMatch.length > 0 && roomsList.length > 0) {
+      roomsToMatch.forEach(rToken => {
+        // Try matching room_id first filtered by Building & Floor
+        let matchedRoom = roomsList.find(r =>
+          String(r.room_id ?? r.id) === rToken &&
+          (targetFloorId ? String(r.fl_id || r.floor_id) === String(targetFloorId) : true) &&
+          (targetBuildingId ? String(r.building_id) === String(targetBuildingId) : true)
+        );
+        // Try matching room_name filtered by Building & Floor
+        if (!matchedRoom) {
+          matchedRoom = roomsList.find(r =>
+            (r.room_name || "").toLowerCase().trim() === rToken &&
+            (targetFloorId ? String(r.fl_id || r.floor_id) === String(targetFloorId) : true) &&
+            (targetBuildingId ? String(r.building_id) === String(targetBuildingId) : true)
+          );
+        }
+        // Fallback with building filter only
+        if (!matchedRoom && targetBuildingId) {
+          matchedRoom = roomsList.find(r =>
+            ((r.room_name || "").toLowerCase().trim() === rToken || String(r.room_id ?? r.id) === rToken) &&
+            String(r.building_id) === String(targetBuildingId)
+          );
+        }
+        // General fallback
+        if (!matchedRoom) {
+          matchedRoom = roomsList.find(r =>
+            (r.room_name || "").toLowerCase().trim() === rToken || String(r.room_id ?? r.id) === rToken
+          );
+        }
+
+        if (matchedRoom && matchedRoom.zone_id) {
+          const zId = Number(matchedRoom.zone_id);
+          const dbZone = zonesList.find(z => String(z.id ?? z.zoneStatusId) === String(zId));
+          const zName = dbZone ? (dbZone.zone || dbZone.zone_name) : (matchedRoom.zone_name || "");
+          if (zName) {
+            matchedZoneMap.set(zName.toLowerCase().trim(), { Zone_Id: zId, zone: String(zName) });
+          }
+        }
+      });
     }
   }
 
-  if (zonesToSearch.length === 0) {
-    zonesToSearch = Object.values(ZONE_MAPPING).flat();
-  }
+  // 3. Resolve canonical zone names from ZONE_MAPPING using room names
+  if (matchedZoneMap.size === 0) {
+    const roomStr = row.room_names || row.Room_Nos || row.Room_Name || "";
+    const roomsToMatch = String(roomStr)
+      .split(",")
+      .map(r => r.trim().toLowerCase())
+      .filter(Boolean);
 
-  const mappingZoneNames = [];
-  if (roomsToMatch.length > 0) {
-    for (const zoneGroup of zonesToSearch) {
-      if (zoneGroup.rooms) {
-        for (const room of zoneGroup.rooms) {
-          const roomName = (typeof room === "object" ? room.name : room) || "";
-          const roomId = (typeof room === "object" ? room.id : "") || "";
-          if (
-            roomsToMatch.includes(roomName.toLowerCase().trim()) ||
-            (roomId && roomsToMatch.includes(String(roomId).toLowerCase().trim()))
-          ) {
-            if (zoneGroup.name && !mappingZoneNames.includes(zoneGroup.name)) {
-              mappingZoneNames.push(zoneGroup.name);
+    const levelKey = row.Room_Type || "";
+    let zonesToSearch = [];
+
+    if (levelKey) {
+      const levelLower = String(levelKey).toLowerCase().trim().replace(/\s+/g, '');
+      const foundKey = Object.keys(ZONE_MAPPING).find(k => {
+        const kClean = k.toLowerCase().trim().replace(/\s+/g, '');
+        return kClean.includes(levelLower) || levelLower.includes(kClean);
+      });
+      if (foundKey) {
+        zonesToSearch = ZONE_MAPPING[foundKey] || [];
+      }
+    }
+
+    if (zonesToSearch.length === 0) {
+      const bName = (row.building_name || "").toLowerCase().trim();
+      const bPrefix = bName ? bName.split(/\s+/)[0] : "";
+      const relevantKeys = Object.keys(ZONE_MAPPING).filter(k => {
+        const kLower = k.toLowerCase().trim();
+        if (bPrefix && kLower.startsWith(bPrefix)) return true;
+        if (bName && kLower.includes(bName)) return true;
+        return false;
+      });
+      if (relevantKeys.length > 0) {
+        zonesToSearch = relevantKeys.flatMap(k => ZONE_MAPPING[k] || []);
+      }
+    }
+
+    const mappingZoneNames = [];
+    if (roomsToMatch.length > 0) {
+      for (const zoneGroup of zonesToSearch) {
+        if (zoneGroup.rooms) {
+          for (const room of zoneGroup.rooms) {
+            const roomName = (typeof room === "object" ? room.name : room) || "";
+            const roomId = (typeof room === "object" ? room.id : "") || "";
+            if (
+              roomsToMatch.includes(roomName.toLowerCase().trim()) ||
+              (roomId && roomsToMatch.includes(String(roomId).toLowerCase().trim()))
+            ) {
+              if (zoneGroup.name && !mappingZoneNames.includes(zoneGroup.name)) {
+                mappingZoneNames.push(zoneGroup.name);
+              }
             }
           }
         }
       }
     }
+
+    mappingZoneNames.forEach(mappingName => {
+      const key = mappingName.toLowerCase().trim();
+      if (!matchedZoneMap.has(key)) {
+        const dbZone = zonesList.find(z => 
+          (z.zone || z.zone_name || "").toLowerCase().trim() === key &&
+          (!targetBuildingId || Number(z.building_id || z.build_id) === targetBuildingId)
+        );
+        if (dbZone) {
+          const zId = Number(dbZone.id ?? dbZone.zoneStatusId);
+          matchedZoneMap.set(key, { Zone_Id: zId, zone: dbZone.zone || dbZone.zone_name || mappingName });
+        }
+      }
+    });
   }
 
-  // 3. For each zone name from ZONE_MAPPING, find database zone object in zonesList
-  mappingZoneNames.forEach(mappingName => {
-    const key = mappingName.toLowerCase().trim();
-    if (!matchedZoneMap.has(key)) {
-      const dbZone = zonesList.find(z => (z.zone || z.zone_name || "").toLowerCase().trim() === key);
-      if (dbZone) {
-        const zId = Number(dbZone.id ?? dbZone.zoneStatusId);
-        matchedZoneMap.set(key, { Zone_Id: zId, zone: dbZone.zone || dbZone.zone_name || mappingName });
-      }
-    }
-  });
-
-  // 4. Fallback if modalTarget already has database zone object or Zone_Id / zone_name
-  if (matchedZoneMap.size === 0) {
-    const dbZoneName = (row.zone && typeof row.zone === "object")
-      ? (row.zone.zone || row.zone.zone_name)
-      : (row.zone_name || row.zone || "");
-    const dbZoneId = row.Zone_Id
-      ? Number(row.Zone_Id)
-      : (row.zone?.id ? Number(row.zone.id) : null);
-
-    if (dbZoneName && dbZoneName !== "—") {
-      let finalId = dbZoneId;
-      if (!finalId) {
-        const found = zonesList.find(z => (z.zone || z.zone_name || "").toLowerCase().trim() === String(dbZoneName).toLowerCase().trim());
-        if (found) finalId = Number(found.id ?? found.zoneStatusId);
-      }
-      if (finalId) {
-        matchedZoneMap.set(String(dbZoneName).toLowerCase().trim(), { Zone_Id: finalId, zone: String(dbZoneName) });
-      }
-    } else if (dbZoneId) {
-      const found = zonesList.find(z => Number(z.id ?? z.zoneStatusId) === dbZoneId);
-      const name = found ? (found.zone || found.zone_name) : `Zone ${dbZoneId}`;
-      matchedZoneMap.set(name.toLowerCase().trim(), { Zone_Id: dbZoneId, zone: name });
-    }
-  }
-
-  // 5. Final fallback: match first zone in zonesList for this building / floor
+  // 4. Final fallback
   if (matchedZoneMap.size === 0 && zonesList.length > 0) {
     const bId = row.Building_Id ? Number(row.Building_Id) : null;
     const fId = row.Floor_Id ? Number(row.Floor_Id) : null;
@@ -808,6 +901,443 @@ const MultiSelectDropdown = ({ options, selectedValues, onChange, placeholder, d
   );
 };
 
+// ─── Electrical Works Dropdown with Panel & System Numbers Filtering ─────────
+const ElectricalWorksDropdown = ({
+  options = [],
+  selectedValues = [],
+  onChange,
+  placeholder = "Select Electrical Works",
+  disabled = false,
+  searchPlaceholder = "Search panel or system number..."
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all"); // "all" | "panel" | "system"
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const handleToggle = () => {
+    if (!disabled) {
+      setIsOpen(!isOpen);
+    }
+  };
+
+  const handleCheckboxChange = (val, checked) => {
+    let newSelected = (selectedValues || []).filter(v => v !== "none");
+    if (checked) {
+      if (!newSelected.includes(val)) {
+        newSelected = [...newSelected, val];
+      }
+    } else {
+      newSelected = newSelected.filter(v => v !== val);
+    }
+    onChange(newSelected);
+  };
+
+  const isPanel = useCallback((item) => {
+    const m = (item?.module || item?.moduleNumber || "").trim().toLowerCase();
+    return m.includes("panel");
+  }, []);
+
+  const isSystem = useCallback((item) => {
+    const m = (item?.module || item?.moduleNumber || "").trim().toLowerCase();
+    return m.includes("system");
+  }, []);
+
+  const panelItems = useMemo(() => options.filter(isPanel), [options, isPanel]);
+  const systemItems = useMemo(() => options.filter(isSystem), [options, isSystem]);
+  const otherItems = useMemo(() => options.filter(item => !isPanel(item) && !isSystem(item)), [options, isPanel, isSystem]);
+
+  const filterBySearch = useCallback((items) => {
+    if (!searchQuery.trim()) return items;
+    const q = searchQuery.toLowerCase().trim();
+    return items.filter(item => {
+      const label = item.electrical_works || item.electricalWork || item.name || `Work ${item.id}`;
+      return String(label).toLowerCase().includes(q);
+    });
+  }, [searchQuery]);
+
+  const filteredPanels = useMemo(() => filterBySearch(panelItems), [filterBySearch, panelItems]);
+  const filteredSystems = useMemo(() => filterBySearch(systemItems), [filterBySearch, systemItems]);
+  const filteredOthers = useMemo(() => filterBySearch(otherItems), [filterBySearch, otherItems]);
+
+  const totalFilteredCount = useMemo(() => {
+    if (categoryFilter === "panel") return filteredPanels.length;
+    if (categoryFilter === "system") return filteredSystems.length;
+    return filteredPanels.length + filteredSystems.length + filteredOthers.length;
+  }, [categoryFilter, filteredPanels, filteredSystems, filteredOthers]);
+
+  // Selected counts
+  const selectedPanelCount = useMemo(() => {
+    return panelItems.filter(item => (selectedValues || []).includes(String(item.id))).length;
+  }, [panelItems, selectedValues]);
+
+  const selectedSystemCount = useMemo(() => {
+    return systemItems.filter(item => (selectedValues || []).includes(String(item.id))).length;
+  }, [systemItems, selectedValues]);
+
+  // Display text
+  let displayText = placeholder;
+  if (selectedValues && selectedValues.length > 0) {
+    const names = selectedValues.map(val => {
+      const item = options.find(o => String(o.id) === String(val));
+      return item ? (item.electrical_works || item.electricalWork || item.name || `ID ${val}`) : val;
+    }).filter(Boolean);
+
+    if (names.length > 0) {
+      displayText = names.join(", ");
+    }
+  }
+
+  const renderItem = (item) => {
+    const val = String(item.id);
+    const label = item.electrical_works || item.electricalWork || item.name || `Work ${item.id}`;
+    const isChecked = (selectedValues || []).includes(val);
+    const itemIsPanel = isPanel(item);
+    const itemIsSystem = isSystem(item);
+
+    return (
+      <label
+        key={item.id}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "12px",
+          padding: "10px 16px",
+          cursor: "pointer",
+          transition: "background-color 0.2s",
+          color: "var(--text-main, #f9fafb)",
+          backgroundColor: isChecked ? "rgba(255, 255, 255, 0.05)" : "transparent",
+          fontSize: "14px",
+          userSelect: "none"
+        }}
+        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "rgba(255, 255, 255, 0.08)"}
+        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = isChecked ? "rgba(255, 255, 255, 0.05)" : "transparent"}
+      >
+        <input
+          type="checkbox"
+          checked={isChecked}
+          onChange={(e) => handleCheckboxChange(val, e.target.checked)}
+          style={{
+            width: "16px",
+            height: "16px",
+            cursor: "pointer",
+            accentColor: "var(--accent, #00e5a0)",
+            borderRadius: "4px"
+          }}
+        />
+        <span style={{ flex: 1 }}>{label}</span>
+        <span
+          style={{
+            fontSize: "11px",
+            padding: "2px 8px",
+            borderRadius: "4px",
+            backgroundColor: itemIsPanel ? "rgba(59, 130, 246, 0.15)" : itemIsSystem ? "rgba(16, 185, 129, 0.15)" : "rgba(255, 255, 255, 0.08)",
+            color: itemIsPanel ? "#60a5fa" : itemIsSystem ? "#34d399" : "var(--text-muted, #9ca3af)",
+            fontWeight: 500
+          }}
+        >
+          {itemIsPanel ? "Panel" : itemIsSystem ? "System" : (item.module || "Other")}
+        </span>
+      </label>
+    );
+  };
+
+  return (
+    <div ref={containerRef} className="custom-multiselect-container" style={{ position: "relative", width: "100%" }}>
+      {/* Trigger Button */}
+      <div
+        className="df-input"
+        onClick={handleToggle}
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          cursor: disabled ? "not-allowed" : "pointer",
+          userSelect: "none",
+          paddingRight: "14px",
+          opacity: disabled ? 0.6 : 1,
+          color: displayText === placeholder ? "var(--text-muted, #9ca3af)" : "var(--text-main, #f9fafb)"
+        }}
+      >
+        <span style={{
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          maxWidth: "calc(100% - 24px)"
+        }}>
+          {displayText}
+        </span>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#9CA3AF"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            transform: isOpen ? "rotate(180deg)" : "rotate(0deg)",
+            transition: "transform 0.2s ease"
+          }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </div>
+
+      {/* Dropdown Menu */}
+      {isOpen && (
+        <div
+          className="custom-multiselect-dropdown"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            left: 0,
+            width: "100%",
+            maxHeight: "340px",
+            overflowY: "auto",
+            backgroundColor: "var(--bg-card, #111827)",
+            border: "1.5px solid var(--border-color, #374151)",
+            borderRadius: "12px",
+            zIndex: 9999,
+            boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5)",
+            padding: "6px 0"
+          }}
+        >
+          {/* Search & Category Filter Header inside dropdown */}
+          <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border-color, #374151)", position: "sticky", top: 0, backgroundColor: "var(--bg-card, #111827)", zIndex: 10 }}>
+            <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+              <input
+                type="text"
+                placeholder={categoryFilter === "panel" ? "Search panel numbers..." : categoryFilter === "system" ? "Search system numbers..." : searchPlaceholder}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  flex: 1,
+                  padding: "6px 10px",
+                  fontSize: "13px",
+                  borderRadius: "6px",
+                  border: "1px solid var(--border-color, #374151)",
+                  backgroundColor: "rgba(255, 255, 255, 0.05)",
+                  color: "var(--text-main, #f9fafb)",
+                  outline: "none"
+                }}
+              />
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  padding: "6px 10px",
+                  backgroundColor: "var(--primary-color, #3b82f6)",
+                  border: "none",
+                  borderRadius: "6px",
+                  color: "#fff",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center"
+                }}
+              >
+                <FaSearch size={12} />
+              </button>
+            </div>
+
+            {/* Category Filter Tabs: All | Panel Numbers | System Numbers */}
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setCategoryFilter("all"); }}
+                style={{
+                  flex: 1,
+                  padding: "5px 8px",
+                  fontSize: "12px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  border: categoryFilter === "all" ? "1px solid #3b82f6" : "1px solid var(--border-color, #374151)",
+                  backgroundColor: categoryFilter === "all" ? "rgba(59, 130, 246, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                  color: categoryFilter === "all" ? "#60a5fa" : "var(--text-muted, #9ca3af)",
+                  fontWeight: categoryFilter === "all" ? 600 : 400,
+                  transition: "all 0.15s ease",
+                  textAlign: "center"
+                }}
+              >
+                All ({options.length})
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setCategoryFilter("panel"); }}
+                style={{
+                  flex: 1,
+                  padding: "5px 8px",
+                  fontSize: "12px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  border: categoryFilter === "panel" ? "1px solid #3b82f6" : "1px solid var(--border-color, #374151)",
+                  backgroundColor: categoryFilter === "panel" ? "rgba(59, 130, 246, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                  color: categoryFilter === "panel" ? "#60a5fa" : "var(--text-muted, #9ca3af)",
+                  fontWeight: categoryFilter === "panel" ? 600 : 400,
+                  transition: "all 0.15s ease",
+                  textAlign: "center"
+                }}
+              >
+                Panel Numbers {selectedPanelCount > 0 ? `(${selectedPanelCount}/${panelItems.length})` : `(${panelItems.length})`}
+              </button>
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setCategoryFilter("system"); }}
+                style={{
+                  flex: 1,
+                  padding: "5px 8px",
+                  fontSize: "12px",
+                  borderRadius: "6px",
+                  cursor: "pointer",
+                  border: categoryFilter === "system" ? "1px solid #10b981" : "1px solid var(--border-color, #374151)",
+                  backgroundColor: categoryFilter === "system" ? "rgba(16, 185, 129, 0.2)" : "rgba(255, 255, 255, 0.04)",
+                  color: categoryFilter === "system" ? "#34d399" : "var(--text-muted, #9ca3af)",
+                  fontWeight: categoryFilter === "system" ? 600 : 400,
+                  transition: "all 0.15s ease",
+                  textAlign: "center"
+                }}
+              >
+                System Numbers {selectedSystemCount > 0 ? `(${selectedSystemCount}/${systemItems.length})` : `(${systemItems.length})`}
+              </button>
+            </div>
+
+            {/* Quick action bar */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "6px", paddingTop: "6px", borderTop: "1px dashed var(--border-color, #374151)", fontSize: "11px" }}>
+              <span style={{ color: "var(--text-muted, #9ca3af)" }}>
+                {categoryFilter === "panel" ? "Showing Panel Numbers" : categoryFilter === "system" ? "Showing System Numbers" : "Showing All Categories"}
+              </span>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const currentItems = categoryFilter === "panel" ? filteredPanels : categoryFilter === "system" ? filteredSystems : [...filteredPanels, ...filteredSystems, ...filteredOthers];
+                    const currentIds = currentItems.map(x => String(x.id));
+                    const newSelected = Array.from(new Set([...(selectedValues || []), ...currentIds]));
+                    onChange(newSelected);
+                  }}
+                  style={{ background: "none", border: "none", color: "#60a5fa", cursor: "pointer", padding: 0, fontSize: "11px", fontWeight: 600 }}
+                >
+                  Select All
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const currentItems = categoryFilter === "panel" ? filteredPanels : categoryFilter === "system" ? filteredSystems : [...filteredPanels, ...filteredSystems, ...filteredOthers];
+                    const currentIds = currentItems.map(x => String(x.id));
+                    const newSelected = (selectedValues || []).filter(v => !currentIds.includes(String(v)));
+                    onChange(newSelected);
+                  }}
+                  style={{ background: "none", border: "none", color: "#f87171", cursor: "pointer", padding: 0, fontSize: "11px", fontWeight: 600 }}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Items List */}
+          {totalFilteredCount === 0 ? (
+            <div style={{ padding: "16px", textAlign: "center", color: "var(--text-muted, #9ca3af)", fontSize: "13px" }}>
+              No electrical works found
+            </div>
+          ) : (
+            <>
+              {/* If "panel" filter is selected */}
+              {categoryFilter === "panel" && filteredPanels.map(renderItem)}
+
+              {/* If "system" filter is selected */}
+              {categoryFilter === "system" && filteredSystems.map(renderItem)}
+
+              {/* If "all" filter is selected: show grouped sections */}
+              {categoryFilter === "all" && (
+                <>
+                  {filteredPanels.length > 0 && (
+                    <div>
+                      <div style={{
+                        padding: "8px 16px 4px 16px",
+                        color: "var(--text-muted, #9ca3af)",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                        backgroundColor: "rgba(255, 255, 255, 0.02)",
+                        display: "flex",
+                        justifyContent: "space-between"
+                      }}>
+                        <span>Panel Numbers</span>
+                        <span>{filteredPanels.length}</span>
+                      </div>
+                      {filteredPanels.map(renderItem)}
+                    </div>
+                  )}
+
+                  {filteredSystems.length > 0 && (
+                    <div>
+                      <div style={{
+                        padding: "8px 16px 4px 16px",
+                        color: "var(--text-muted, #9ca3af)",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                        backgroundColor: "rgba(255, 255, 255, 0.02)",
+                        borderTop: filteredPanels.length > 0 ? "1px solid var(--border-color, #374151)" : "none",
+                        display: "flex",
+                        justifyContent: "space-between"
+                      }}>
+                        <span>System Numbers</span>
+                        <span>{filteredSystems.length}</span>
+                      </div>
+                      {filteredSystems.map(renderItem)}
+                    </div>
+                  )}
+
+                  {filteredOthers.length > 0 && (
+                    <div>
+                      <div style={{
+                        padding: "8px 16px 4px 16px",
+                        color: "var(--text-muted, #9ca3af)",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px",
+                        backgroundColor: "rgba(255, 255, 255, 0.02)",
+                        borderTop: "1px solid var(--border-color, #374151)",
+                        display: "flex",
+                        justifyContent: "space-between"
+                      }}>
+                        <span>Other Electrical Works</span>
+                        <span>{filteredOthers.length}</span>
+                      </div>
+                      {filteredOthers.map(renderItem)}
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const isTodayDate = (dateVal) => {
   if (!dateVal) return false;
 
@@ -865,11 +1395,127 @@ const isTodayDate = (dateVal) => {
   );
 };
 
+const ALL_COLUMNS_CONFIG = [
+  { id: "PermitNo", label: "Permit Number" },
+  { id: "hraCell", label: "HRA'S" },
+  { id: "permit_under", label: "Permit Under" },
+  { id: "Request_Date", label: "Request Date" },
+  { id: "permit_type", label: "Permit Type" },
+  { id: "work_type", label: "Type of Work" },
+  { id: "Activity", label: "Activity" },
+  { id: "contractorName", label: "Contractor" },
+  { id: "buildingName", label: "Building" },
+  { id: "Room_Type", label: "Level" },
+  { id: "zone", label: "Zone" },
+  { id: "rooms", label: "Rooms" },
+  { id: "Working_Date", label: "Working Date" },
+  { id: "timeCell", label: "Time" },
+  { id: "nightShiftCell", label: "Working After Midnight" },
+  { id: "newEndTimeCell", label: "New End Time" },
+  { id: "statusCell", label: "Status" },
+  { id: "operationsCell", label: "Operations" }
+];
+
+const STORAGE_KEY_VISIBLE_COLUMNS = "beam_list_request_visible_columns";
+
 const ListRequest = () => {
   const navigate = useNavigate();
   const currentUser = useMemo(() => getUser(), []);
-  const userContractorId = currentUser?.typeId || currentUser?.subContId || currentUser?.subContractorId;
+  const ptwModuleCtx = useMemo(() => getModuleUserContext("permit-to-work", currentUser), [currentUser]);
+  const userContractorId = useMemo(() => {
+    if (ptwModuleCtx.contractorId) return String(ptwModuleCtx.contractorId);
+    const rawSubId =
+      currentUser?.subContId !== undefined && currentUser?.subContId !== null ? currentUser.subContId :
+      currentUser?.subcontractor_id !== undefined && currentUser?.subcontractor_id !== null ? currentUser.subcontractor_id :
+      currentUser?.subContractorId !== undefined && currentUser?.subContractorId !== null ? currentUser.subContractorId :
+      null;
+    if (rawSubId) return String(rawSubId);
+    if (ptwModuleCtx.isContractor && currentUser?.typeId && !currentUser?.departId) {
+      return String(currentUser.typeId);
+    }
+    return "";
+  }, [currentUser, ptwModuleCtx]);
   const location = useLocation();
+
+  // Column Visibility States
+  const [visibleColumns, setVisibleColumns] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY_VISIBLE_COLUMNS);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load saved column preferences", e);
+    }
+    return ALL_COLUMNS_CONFIG.map(col => col.id);
+  });
+
+  const [colDropdownOpen, setColDropdownOpen] = useState(false);
+  const [columnSearch, setColumnSearch] = useState("");
+  const colDropdownRef = useRef(null);
+
+  useEffect(() => {
+    const handleOutsideClick = (e) => {
+      if (colDropdownRef.current && !colDropdownRef.current.contains(e.target)) {
+        setColDropdownOpen(false);
+      }
+    };
+    if (colDropdownOpen) {
+      document.addEventListener("mousedown", handleOutsideClick);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, [colDropdownOpen]);
+
+  const handleToggleColumn = (colId) => {
+    setVisibleColumns((prev) => {
+      let next;
+      if (prev.includes(colId)) {
+        if (prev.length <= 1) {
+          showError("At least one column must remain visible in the table.");
+          return prev;
+        }
+        next = prev.filter(id => id !== colId);
+        const colDef = ALL_COLUMNS_CONFIG.find(c => c.id === colId);
+        showSuccess(`Column "${colDef?.label || colId}" removed from table.`);
+      } else {
+        const allIds = ALL_COLUMNS_CONFIG.map(c => c.id);
+        next = allIds.filter(id => prev.includes(id) || id === colId);
+        const colDef = ALL_COLUMNS_CONFIG.find(c => c.id === colId);
+        showSuccess(`Column "${colDef?.label || colId}" displayed in table.`);
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY_VISIBLE_COLUMNS, JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+  };
+
+  const handleRemoveColumn = (colId) => {
+    handleToggleColumn(colId);
+  };
+
+  const handleShowAllColumns = () => {
+    const allIds = ALL_COLUMNS_CONFIG.map(c => c.id);
+    setVisibleColumns(allIds);
+    try {
+      localStorage.setItem(STORAGE_KEY_VISIBLE_COLUMNS, JSON.stringify(allIds));
+    } catch (e) {}
+    showSuccess("All columns restored.");
+  };
+
+  const handleResetColumns = () => {
+    const allIds = ALL_COLUMNS_CONFIG.map(c => c.id);
+    setVisibleColumns(allIds);
+    try {
+      localStorage.removeItem(STORAGE_KEY_VISIBLE_COLUMNS);
+    } catch (e) {}
+    showSuccess("Reset columns to default.");
+  };
 
   useEffect(() => {
     const queryParams = new URLSearchParams(location.search);
@@ -920,10 +1566,13 @@ const getInitialSearchFilters = () => {
           areas: [],
           zones: [],
           hras: [],
-          electrical_works: [],
-          mechanical_works: [],
           permitType: "",
           permitUnder: "",
+          panelNumbers: [],
+          systemNumbers: [],
+          otherElectricalWorks: [],
+          electricalWorks: [],
+          mechanicalWorks: [],
           fromDate: "",
           toDate: "",
           startTime: "",
@@ -933,6 +1582,11 @@ const getInitialSearchFilters = () => {
           newEndTime: "",
           typeOfActivityId: "",
           ...parsed,
+          panelNumbers: parsed.panelNumbers || [],
+          systemNumbers: parsed.systemNumbers || [],
+          otherElectricalWorks: parsed.otherElectricalWorks || [],
+          electricalWorks: parsed.electricalWorks || [],
+          mechanicalWorks: parsed.mechanicalWorks || [],
         };
       }
     } catch (e) {
@@ -949,10 +1603,13 @@ const getInitialSearchFilters = () => {
     areas: [],
     zones: [],
     hras: [],
-    electrical_works: [],
-    mechanical_works: [],
     permitType: "",
     permitUnder: "",
+    panelNumbers: [],
+    systemNumbers: [],
+    otherElectricalWorks: [],
+    electricalWorks: [],
+    mechanicalWorks: [],
     fromDate: "",
     toDate: "",
     startTime: "",
@@ -979,8 +1636,6 @@ const getInitialPage = () => {
   const [currentPage, setCurrentPage] = useState(getInitialPage);
   const [limit, setLimit] = useState(30);
   const [isLoading, setIsLoading] = useState(false);
-  const [isActionSubmitting, setIsActionSubmitting] = useState(false);
-  const [actionSubmittingText, setActionSubmittingText] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
   const [loadingEditId, setLoadingEditId] = useState(null);
 
@@ -991,8 +1646,6 @@ const getInitialPage = () => {
   const [floorsList, setFloorsList] = useState([]);
   const [zonesList, setZonesList] = useState([]);
   const [roomsList, setRoomsList] = useState([]);
-  const [electricalWorksList, setElectricalWorksList] = useState([]);
-  const [mechanicalWorksList, setMechanicalWorksList] = useState([]);
 
   // Collapsible filters card
   const [filtersOpen, setFiltersOpen] = useState(true);
@@ -1010,6 +1663,7 @@ const getInitialPage = () => {
   const [rejectReason, setRejectReason] = useState("");
   const [cancelReason, setCancelReason] = useState("");
   const [closeNote, setCloseNote] = useState("");
+  const [closeReason, setCloseReason] = useState("");
   const [submitStatusOverride, setSubmitStatusOverride] = useState(null);
   const [closingImageFiles, setClosingImageFiles] = useState([]);
 
@@ -1048,51 +1702,126 @@ const getInitialPage = () => {
   const [showCopyNewEndPicker, setShowCopyNewEndPicker] = useState(false);
   const [logsData, setLogsData] = useState([]);
   const [copyDates, setCopyDates] = useState({ from: "", to: "", startTime: "", endTime: "", nightShift: false, newEndTime: "" });
+  const [electricalWorksList, setElectricalWorksList] = useState([]);
+  const [mechanicalWorksList, setMechanicalWorksList] = useState([]);
 
-  // Check operator credentials (with multi-role support)
+  // Check operator credentials (with multi-role support for permit-to-work)
   const userRoles = useMemo(() => {
-    const roleVal = currentUser?.role || currentUser?.userType || "";
-    if (typeof roleVal === "string") {
-      return roleVal.split(",").map(r => r.trim().toLowerCase());
+    if (isUserAdmin(currentUser)) {
+      return ["admin"];
     }
-    if (Array.isArray(roleVal)) {
-      return roleVal.map(r => String(r).trim().toLowerCase());
+    const parsedMap = parseModuleAccess(currentUser?.moduleAccess);
+    const ptwRole = parsedMap["permit-to-work"];
+    let effectiveRole = null;
+    try {
+      effectiveRole = getEffectiveRoleForModule("permit-to-work", currentUser);
+    } catch {
+      // fallback
     }
-    return [String(roleVal).trim().toLowerCase()];
+    const allRoleStrings = [
+      effectiveRole,
+      ptwRole,
+      currentUser?.role,
+      currentUser?.userType,
+      currentUser?.user_type,
+      localStorage.getItem("primaryUserType"),
+      localStorage.getItem("UserType")
+    ].filter(Boolean);
+
+    const rolesSet = new Set();
+    allRoleStrings.forEach(val => {
+      if (typeof val === "string") {
+        val.split(",").forEach(r => {
+          const trimmed = r.trim().toLowerCase();
+          if (trimmed) rolesSet.add(trimmed);
+        });
+      } else if (Array.isArray(val)) {
+        val.forEach(r => {
+          const trimmed = String(r).trim().toLowerCase();
+          if (trimmed) rolesSet.add(trimmed);
+        });
+      }
+    });
+    return Array.from(rolesSet);
   }, [currentUser]);
 
-  const isAdmin = userRoles.includes("admin");
-  const isDept = userRoles.includes("department");
-  const isDept1 = userRoles.includes("department1");
-  const isSubcontractor = userRoles.includes("subcontractor") ||
-                          userRoles.includes("contractor") ||
-                          userRoles.includes("sub_contractor") ||
-                          userRoles.includes("sub-contractor");
-  const isObserver = userRoles.includes("observer");
-  const canBulkAction = isAdmin || isDept || isDept1;
-  const isMultiDept = isDept && isDept1;
+  const activeRole = (localStorage.getItem("UserType") || "").toLowerCase().trim();
+  const isObserver = activeRole ? activeRole.includes("observer") : (userRoles.includes("observer") && !userRoles.some(r => ["admin", "superadmin", "department", "department1"].includes(r)));
+  const isAdmin = !isObserver && (activeRole ? (activeRole.includes("admin") || activeRole.includes("superadmin")) : (userRoles.some(r => ["admin", "superadmin"].includes(r)) || isUserAdmin(currentUser)));
+  const isDept = !isObserver && !isAdmin && (activeRole ? (activeRole.includes("department") || activeRole.includes("conm") || activeRole.includes("hse")) && !activeRole.includes("department1") : userRoles.some(r => ["department", "operator", "conm", "hse"].includes(r)));
+  const isDept1 = !isObserver && !isAdmin && (activeRole ? (activeRole.includes("department1") || activeRole.includes("c&q") || activeRole.includes("comm")) : userRoles.some(r => ["department1", "operator1", "c&q", "comm"].includes(r)));
+  const isMultiDept = !isObserver && !isAdmin && ((isDept && isDept1) || activeRole.includes("multi_dept") || userRoles.includes("multi_dept"));
+  const isSubcontractor = !isObserver && !isAdmin && !isDept && !isDept1 && (activeRole ? (activeRole.includes("subcontractor") || activeRole.includes("contractor")) : (userRoles.includes("subcontractor") || userRoles.includes("contractor") || userRoles.includes("sub_contractor") || userRoles.includes("sub-contractor")));
+  const canBulkAction = !isObserver && (isAdmin || isDept || isDept1 || isMultiDept);
 
   const checkIfHideCheckbox = useCallback((row) => {
+    // Observers and Subcontractors have no bulk permit management / selection rights
     if (isObserver || isSubcontractor) return true;
+    if (!row) return true;
+
+    // Normalization of fields (safely defaulting to "Construction" if empty, matching backend & database)
+    const pUnder = (row.permit_under || row.permitUnder || "Construction").toString().trim().toLowerCase();
+    const pType = (row.permit_type || row.permitType || "Construction").toString().trim().toLowerCase();
+    const status = (row.Request_status || row.request_status || row.requestStatus || "").toString().trim().toLowerCase();
+
+    // Terminal statuses & draft cannot be approved, pre-approved, rejected, or bulk edited by departments
+    const isTerminalOrDraft = ["closed", "cancelled", "auto-cancelled", "auto cancelled", "rejected", "draft"].includes(status);
+    if (isTerminalOrDraft) {
+      // SuperAdmin / Admin can select terminal rows for bulk deletion
+      return !isAdmin;
+    }
+
+    // Admin and Multi-Department (holding both Department & Department1) have access to all active permits
     if (isAdmin || isMultiDept) return false;
+
+    // 1. Pure Construction permit (Construction under Construction)
+    if (pUnder === "construction" && pType === "construction") {
+      // Accessible ONLY by Department (ConM)
+      return !isDept;
+    }
+
+    // 2. Pure Commissioning permit (Commissioning under Commissioning)
+    if (pUnder === "commissioning" && pType === "commissioning") {
+      // Accessible ONLY by Department1 (C&Q / COMM)
+      return !isDept1;
+    }
+
+    // 3. Mixed: Construction permit under Commissioning
+    if (pUnder === "commissioning" && pType === "construction") {
+      // Both CoMM and ConM can reject at Hold, Pre-Approved, Approved, Opened (as per BEAM Rejection Flow)
+      if (status === "hold" || status === "pre-approved" || status === "approved" || status === "opened") {
+        return !(isDept || isDept1);
+      }
+      return !(isDept || isDept1);
+    }
+
+    // 4. Mixed: Commissioning permit under Construction
+    if (pUnder === "construction" && pType === "commissioning") {
+      // Both CoMM and ConM can reject at Hold, Pre-Approved, Approved, Opened (as per BEAM Rejection Flow)
+      if (status === "hold" || status === "pre-approved" || status === "approved" || status === "opened") {
+        return !(isDept || isDept1);
+      }
+      return !(isDept || isDept1);
+    }
+
+    // Fallback: Check if user's role matches either stream
     if (isDept) {
-      const eitherIsConstruction = String(row.permit_under).toLowerCase() === "construction" ||
-                                    String(row.permit_type).toLowerCase() === "construction";
-      return !eitherIsConstruction;
+      const involvesConstruction = pUnder === "construction" || pType === "construction";
+      return !involvesConstruction;
     }
     if (isDept1) {
-      const bothAreConstruction = String(row.permit_under).toLowerCase() === "construction" &&
-                                   String(row.permit_type).toLowerCase() === "construction";
-      return bothAreConstruction;
+      const involvesCommissioning = pUnder === "commissioning" || pType === "commissioning";
+      return !involvesCommissioning;
     }
-    return false;
+
+    return true;
   }, [isAdmin, isDept, isDept1, isMultiDept, isObserver, isSubcontractor]);
 
   // ─── Fetch Selector Lists ──────────────────────────────────────────────────
   useEffect(() => {
     const fetchSelectors = async () => {
       try {
-        const [subRes, actRes, buildRes, floorRes, zoneRes, roomRes, precautionsRes, elecRes, mechRes] = await Promise.all([
+        const [subRes, actRes, buildRes, floorRes, zoneRes, roomRes, precautionsRes, eleRes, mechRes] = await Promise.all([
           getContractors(1, 1000),
           getActivities(1, 1000),
           getBuildings(1, 1000),
@@ -1123,7 +1852,7 @@ const getInitialPage = () => {
         setZonesList(zoneRes?.data ?? []);
         setRoomsList(roomRes?.data?.rows ?? roomRes?.data ?? roomRes ?? []);
         setPrecautionsList(precautionsRes?.data?.rows ?? precautionsRes?.data ?? precautionsRes ?? []);
-        setElectricalWorksList(elecRes?.data?.rows ?? elecRes?.data ?? elecRes ?? []);
+        setElectricalWorksList(eleRes?.data?.rows ?? eleRes?.data ?? eleRes ?? []);
         setMechanicalWorksList(mechRes?.data?.rows ?? mechRes?.data ?? mechRes ?? []);
       } catch (err) {
         console.error("Failed to load selectors lists", err);
@@ -1190,8 +1919,18 @@ const getInitialPage = () => {
     }
 
     if (searchFilters.levels && searchFilters.levels.length > 0) {
+      const isLevelMatch = (filterLevel, targetName) => {
+        if (!filterLevel || !targetName) return false;
+        const fl = String(filterLevel).trim().toLowerCase();
+        const tn = String(targetName).trim().toLowerCase();
+        if (fl === tn || fl.endsWith(tn) || tn.endsWith(fl)) return true;
+        const baseFl = fl.replace(/^(?:[a-z0-9]+\s*[-:]?\s*)/i, '').trim();
+        const baseTn = tn.replace(/^(?:[a-z0-9]+\s*[-:]?\s*)/i, '').trim();
+        return baseFl.length > 0 && baseFl === baseTn;
+      };
+
       const matchedFloorIds = floorsList
-        .filter(f => searchFilters.levels.includes(f.floor_name))
+        .filter(f => searchFilters.levels.some(l => isLevelMatch(l, f.floor_name)))
         .map(f => Number(f.fl_id));
 
       const zoneIdsFromRooms = roomsList
@@ -1201,7 +1940,7 @@ const getInitialPage = () => {
 
       zonesToFilter = zonesToFilter.filter(z => {
         const matchDirectFloorId = z.floor_id !== undefined && z.floor_id !== null && matchedFloorIds.includes(Number(z.floor_id));
-        const matchDirectLevelName = z.level !== undefined && z.level !== null && searchFilters.levels.includes(z.level);
+        const matchDirectLevelName = z.level !== undefined && z.level !== null && searchFilters.levels.some(l => isLevelMatch(l, z.level));
         const matchViaRooms = zoneIdsFromRooms.includes(Number(z.id));
         return matchDirectFloorId || matchDirectLevelName || matchViaRooms;
       });
@@ -1284,17 +2023,39 @@ const getInitialPage = () => {
     }));
   }, [roomsList, zonesList, floorsList, searchFilters.buildings, searchFilters.levels, searchFilters.zones]);
 
+  // Migration for any legacy saved filters with panelNumbers or systemNumbers into unified electricalWorks
+  useEffect(() => {
+    if (
+      (searchFilters.panelNumbers && searchFilters.panelNumbers.length > 0) ||
+      (searchFilters.systemNumbers && searchFilters.systemNumbers.length > 0) ||
+      (searchFilters.otherElectricalWorks && searchFilters.otherElectricalWorks.length > 0)
+    ) {
+      setSearchFilters(prev => ({
+        ...prev,
+        electricalWorks: Array.from(new Set([
+          ...(prev.electricalWorks || []),
+          ...(prev.panelNumbers || []),
+          ...(prev.systemNumbers || []),
+          ...(prev.otherElectricalWorks || [])
+        ])),
+        panelNumbers: [],
+        systemNumbers: [],
+        otherElectricalWorks: []
+      }));
+    }
+  }, []);
+
   const electricalWorksOptions = useMemo(() => {
-    return (electricalWorksList || []).map((item) => ({
-      value: String(item.id ?? item.electrical_works),
-      label: item.electrical_works || item.name || String(item.id)
+    return electricalWorksList.map(item => ({
+      value: String(item.id),
+      label: item.electrical_works || item.electricalWork || item.name || `Electrical Work ${item.id}`
     }));
   }, [electricalWorksList]);
 
   const mechanicalWorksOptions = useMemo(() => {
-    return (mechanicalWorksList || []).map((item) => ({
-      value: String(item.id ?? item.mechanical_works),
-      label: item.mechanical_works || item.name || String(item.id)
+    return mechanicalWorksList.map(item => ({
+      value: String(item.id),
+      label: item.mechanical_works || item.mechanicalWork || item.name || `Mechanical Work ${item.id}`
     }));
   }, [mechanicalWorksList]);
 
@@ -1317,6 +2078,13 @@ const getInitialPage = () => {
 
     setIsLoading(true);
     try {
+      const combinedElectricalWorks = Array.from(new Set([
+        ...(searchFilters.panelNumbers || []),
+        ...(searchFilters.systemNumbers || []),
+        ...(searchFilters.otherElectricalWorks || []),
+        ...(searchFilters.electricalWorks || [])
+      ])).filter(Boolean);
+
       const payload = {
         Activity: searchFilters.keyword || null,
         PermitNo: searchFilters.permitNo || null,
@@ -1329,10 +2097,10 @@ const getInitialPage = () => {
           ? zonesList.filter(z => searchFilters.zones && searchFilters.zones.includes(z.zone)).map(z => z.id)
           : null,
         zone: searchFilters.zones && searchFilters.zones.length > 0 ? searchFilters.zones.join(",") : null,
-        electrical_works: searchFilters.electrical_works?.length > 0 ? searchFilters.electrical_works.join(",") : null,
-        mechanical_works: searchFilters.mechanical_works?.length > 0 ? searchFilters.mechanical_works.join(",") : null,
         permit_type: searchFilters.permitType || "",
         permit_under: searchFilters.permitUnder || "",
+        electrical_works: (isAdmin || isDept1 || isMultiDept) && combinedElectricalWorks.length > 0 ? combinedElectricalWorks.join(",") : null,
+        mechanical_works: (isAdmin || isDept1 || isMultiDept) && searchFilters.mechanicalWorks && searchFilters.mechanicalWorks.length > 0 ? searchFilters.mechanicalWorks.join(",") : null,
         night_shift: searchFilters.nightShift || "",
         new_date: searchFilters.newDate || "",
         new_end_time: searchFilters.newEndTime ? (searchFilters.newEndTime.length === 5 ? `${searchFilters.newEndTime}:00` : searchFilters.newEndTime) : "",
@@ -1420,7 +2188,7 @@ const getInitialPage = () => {
     setSearchFilters({
       keyword: "",
       permitNo: "",
-      contractors: isSubcontractor && currentUser?.typeId ? [String(currentUser.typeId)] : [],
+      contractors: isSubcontractor && userContractorId ? [String(userContractorId)] : [],
       statuses: [],
       buildings: [],
       levels: [],
@@ -1429,6 +2197,11 @@ const getInitialPage = () => {
       hras: [],
       permitType: "",
       permitUnder: "",
+      panelNumbers: [],
+      systemNumbers: [],
+      otherElectricalWorks: [],
+      electricalWorks: [],
+      mechanicalWorks: [],
       fromDate: "",
       toDate: "",
       startTime: "",
@@ -1443,11 +2216,13 @@ const getInitialPage = () => {
 
   // ─── Select Handling ───────────────────────────────────────────────────────
   const handleSelectAll = (checked) => {
+    const selectableRequests = requests.filter(r => !checkIfHideCheckbox(r));
+    const selectableIds = selectableRequests.map(r => r.id);
     if (checked) {
-      const selectableRequests = requests.filter(r => !checkIfHideCheckbox(r));
-      setSelectedIds(selectableRequests.map(r => r.id));
+      setSelectedIds(prev => Array.from(new Set([...prev, ...selectableIds])));
     } else {
-      setSelectedIds([]);
+      const selectableSet = new Set(selectableIds);
+      setSelectedIds(prev => prev.filter(id => !selectableSet.has(id)));
     }
   };
 
@@ -1549,11 +2324,252 @@ const getInitialPage = () => {
     return currentUser?.role || "";
   };
 
+  const canUserApprove = (row, status) => {
+    if (isAdmin || isMultiDept) return true;
+    if (!row) return false;
+    const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+    const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+
+    if (status === "Pre-Approved") {
+      if (pType === "construction" && pUnder === "commissioning") {
+        return isDept;
+      }
+      if (pType === "commissioning" && pUnder === "construction") {
+        return isDept1;
+      }
+      return false;
+    }
+
+    if (status === "Approved") {
+      if (pType === "commissioning" && pUnder === "commissioning") {
+        return isDept1;
+      }
+      if (pType === "construction" && pUnder === "construction") {
+        return isDept;
+      }
+      if (pType === "construction" && pUnder === "commissioning") {
+        return isDept1;
+      }
+      if (pType === "commissioning" && pUnder === "construction") {
+        return isDept;
+      }
+      return false;
+    }
+
+    return false;
+  };
+
+  const canUserReject = (row, targetStatus = modalStatus) => {
+    if (isAdmin || isMultiDept) return true;
+    if (!row) return false;
+    const permitType = (row.permit_type || row.permitType || "").trim();
+    const permitUnder = (row.permit_under || row.permitUnder || "").trim();
+
+    const isBothConstruction = (permitUnder === "Construction" && permitType === "Construction");
+    const isBothCommissioning = (permitUnder === "Commissioning" && permitType === "Commissioning");
+    const isMixed =
+      (permitUnder === "Construction" && permitType === "Commissioning") ||
+      (permitUnder === "Commissioning" && permitType === "Construction");
+
+    if (isBothConstruction) {
+      return isDept;
+    }
+    if (isBothCommissioning) {
+      return isDept1;
+    }
+    if (isMixed) {
+      return isDept || isDept1;
+    }
+    return isDept || isDept1;
+  };
+
+  const canUserOpen = (row) => {
+    if (isAdmin || isMultiDept || isSubcontractor) return true;
+    if (!row) return false;
+    const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+    const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+
+    const isBothConstruction = (pUnder === "construction" && pType === "construction");
+    const isBothCommissioning = (pUnder === "commissioning" && pType === "commissioning");
+    const isMixed =
+      (pUnder === "construction" && pType === "commissioning") ||
+      (pUnder === "commissioning" && pType === "construction");
+
+    if (isBothConstruction) return isDept;
+    if (isBothCommissioning) return isDept1;
+    if (isMixed) return isDept || isDept1;
+
+    return isDept || isDept1;
+  };
+
+  const canUserClose = (row) => {
+    if (isAdmin || isMultiDept || isSubcontractor) return true;
+    if (!row) return false;
+    const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+    const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+
+    const isBothConstruction = (pUnder === "construction" && pType === "construction");
+    const isBothCommissioning = (pUnder === "commissioning" && pType === "commissioning");
+    const isMixed =
+      (pUnder === "construction" && pType === "commissioning") ||
+      (pUnder === "commissioning" && pType === "construction");
+
+    if (isBothConstruction) return isDept;
+    if (isBothCommissioning) return isDept1;
+    if (isMixed) return isDept || isDept1;
+
+    return isDept || isDept1;
+  };
+
+  const getPermitZoneStatusChangeInfo = useCallback((row) => {
+    if (!row) {
+      return {
+        isChanged: false,
+        currentStatuses: [],
+        currentStatusLabels: [],
+        permitUnderLabel: "",
+      };
+    }
+
+    const statusLabelMap = {
+      UC: "Construction",
+      C: "Commissioning",
+      HO: "Hand Over",
+    };
+
+    const permitUnderRaw = (row.permit_under || row.permitUnder || "").toString().trim();
+    const permitUnderNorm = permitUnderRaw.toLowerCase();
+    const expectedZoneStatus =
+      permitUnderNorm === "commissioning"
+        ? "C"
+        : permitUnderNorm === "construction"
+          ? "UC"
+          : null;
+
+    const matchedZones = [];
+    const seenIds = new Set();
+    const tryAddZone = (z) => {
+      if (!z) return;
+      const zId = String(z.id ?? z.zoneStatusId ?? "");
+      if (!zId || seenIds.has(zId)) return;
+      seenIds.add(zId);
+      matchedZones.push(z);
+    };
+
+    const rowBuildingId = row.Building_Id ?? row.building_id;
+    const rawZoneId = row.Zone_Id ?? row.zone_id;
+
+    // 1. Match directly by Zone_Id
+    if (rawZoneId !== undefined && rawZoneId !== null && String(rawZoneId).trim() !== "") {
+      const ids = String(rawZoneId)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      ids.forEach((idStr) => {
+        let match = zonesList.find(
+          (z) =>
+            String(z.id ?? z.zoneStatusId) === idStr &&
+            (!rowBuildingId || !z.building_id || String(z.building_id) === String(rowBuildingId))
+        );
+        if (!match) {
+          match = zonesList.find((z) => String(z.id ?? z.zoneStatusId) === idStr);
+        }
+        tryAddZone(match);
+      });
+    }
+
+    // 2. Fallback: match via Room_Nos -> roomsList -> zone_id
+    if (matchedZones.length === 0 && roomsList.length > 0 && zonesList.length > 0) {
+      const rawRooms = row.Room_Nos ?? row.room_nos ?? row.room_names ?? "";
+      const roomTokens = String(rawRooms)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (roomTokens.length > 0) {
+        const lowerTokens = new Set(roomTokens.map((t) => t.toLowerCase()));
+        roomsList.forEach((r) => {
+          const bMatch = !rowBuildingId || !r.building_id || String(r.building_id) === String(rowBuildingId);
+          if (!bMatch) return;
+          const rId = String(r.room_id ?? r.id ?? "").toLowerCase();
+          const rName = String(r.room_name ?? r.roomName ?? "").trim().toLowerCase();
+          if (lowerTokens.has(rId) || lowerTokens.has(rName)) {
+            const zMatch = zonesList.find((z) => String(z.id ?? z.zoneStatusId) === String(r.zone_id));
+            tryAddZone(zMatch);
+          }
+        });
+      }
+    }
+
+    // 3. Fallback: match via zone_name / zone string within the same building
+    if (matchedZones.length === 0 && zonesList.length > 0) {
+      const rawZoneNames =
+        typeof row.zone_name === "string" && row.zone_name.trim()
+          ? row.zone_name
+          : typeof row.zone === "string" && row.zone.trim()
+            ? row.zone
+            : "";
+      if (rawZoneNames && rawZoneNames !== "—") {
+        const nameTokens = rawZoneNames
+          .split(",")
+          .map((s) => s.trim().toLowerCase())
+          .filter(Boolean);
+        nameTokens.forEach((zNameLower) => {
+          const zMatch = zonesList.find(
+            (z) =>
+              String(z.zone ?? z.zone_name ?? "").trim().toLowerCase() === zNameLower &&
+              (!rowBuildingId || !z.building_id || String(z.building_id) === String(rowBuildingId))
+          );
+          tryAddZone(zMatch);
+        });
+      }
+    }
+
+    let uniqueStatuses = [];
+    if (matchedZones.length > 0) {
+      uniqueStatuses = Array.from(
+        new Set(
+          matchedZones
+            .map((z) => (z.status || "").toString().toUpperCase().trim())
+            .filter(Boolean)
+        )
+      );
+    } else if (row.current_zone_status) {
+      uniqueStatuses = Array.from(
+        new Set(
+          String(row.current_zone_status)
+            .split(",")
+            .map((s) => s.toUpperCase().trim())
+            .filter(Boolean)
+        )
+      );
+    }
+
+    const hasHO = uniqueStatuses.includes("HO");
+    const hasMixed = uniqueStatuses.length > 1;
+    const hasMismatch =
+      expectedZoneStatus !== null &&
+      uniqueStatuses.length === 1 &&
+      uniqueStatuses[0] !== expectedZoneStatus;
+
+    const isChanged =
+      uniqueStatuses.length > 0
+        ? hasHO || hasMixed || hasMismatch
+        : Boolean(row.is_zone_status_changed);
+
+    return {
+      isChanged,
+      currentStatuses: uniqueStatuses,
+      currentStatusLabels: uniqueStatuses.map((s) => statusLabelMap[s] || s),
+      permitUnderLabel: permitUnderRaw || "Original Status",
+    };
+  }, [zonesList, roomsList]);
+
   const proceedWithStatusChange = (row, status) => {
     const currentStatus = row?.Request_status || row?.request_status || "";
     const workingDateVal = row?.Working_Date || row?.workingDate || row?.working_date || "";
 
     const isWorkingDateToday = isTodayDate(workingDateVal);
+    const canApproveThis = canUserApprove(row, status);
 
     setModalTarget(row);
     setModalStatus(status);
@@ -1562,9 +2578,10 @@ const getInitialPage = () => {
     setRejectReason("");
     setCancelReason("");
     setCloseNote("");
+    setCloseReason("");
     setClosingImageFiles([]);
     setOpenActionType(isWorkingDateToday ? "Open" : "Cancel");
-    setApproveActionType("Approve");
+    setApproveActionType(canApproveThis ? "Approve" : "Reject");
     setLowRiskHotwork(0);
     setHighRiskHotwork(0);
     setHotWorkChecklistFilled(0);
@@ -1587,49 +2604,80 @@ const getInitialPage = () => {
     const permitType = row.permit_type || "";
     const permitUnder = row.permit_under || "";
 
-    // Role based validations for Pre-Approved and Approved transitions
-    if (!isAdmin) {
-      if (status === "Pre-Approved") {
-        // Pre-Approve: Construction permit under Commissioning -> CONM (isDept) pre-approves
-        if (permitType === "Construction" && permitUnder === "Commissioning") {
-          if (!isDept) {
-            return showError("Only CONM role can pre-approve Construction permits under Commissioning.");
-          }
+    // Zone status change protection when closing an Opened permit:
+    // Restrict non-admin users and allow only Admin to close with a close reason.
+    if (status === "Closed" && currentStatus.toLowerCase().trim() === "opened") {
+      const zoneChangeInfo = getPermitZoneStatusChangeInfo(row);
+      if (zoneChangeInfo.isChanged) {
+        if (!isAdmin) {
+          const statusText =
+            zoneChangeInfo.currentStatusLabels.length > 0
+              ? ` (${zoneChangeInfo.currentStatusLabels.join(", ")})`
+              : "";
+          return showError(
+            `Cannot close this permit because the zone status has changed${statusText} from ${zoneChangeInfo.permitUnderLabel}. Only an Admin can close this permit with a close reason.`
+          );
         }
-        // Pre-Approve: Commissioning permit under Construction -> COMM (isDept1) pre-approves
-        else if (permitType === "Commissioning" && permitUnder === "Construction") {
-          if (!isDept1) {
-            return showError("Only COMM role can pre-approve Commissioning permits under Construction.");
+        proceedWithStatusChange(row, "Closed");
+        return;
+      }
+    }
+
+    // Role based validations for Pre-Approved, Approved, Opened, and Rejected transitions
+    if (!isAdmin && !isMultiDept && !isSubcontractor) {
+      if (status === "Pre-Approved" || status === "Approved") {
+        const canApproveThis = canUserApprove(row, status);
+        const canRejectThis = canUserReject(row, status);
+
+        if (!canApproveThis && !canRejectThis) {
+          if (status === "Pre-Approved") {
+            return showError("You do not have permission to pre-approve or reject this permit.");
           }
-        } else {
-          return showError("This permit configuration does not support the Pre-Approved status.");
+          if (status === "Approved") {
+            return showError("You do not have permission to approve or reject this permit.");
+          }
         }
       }
 
-      if (status === "Approved") {
-        // Approve: Commissioning + Commissioning -> COMM (isDept1) approves
-        if (permitType === "Commissioning" && permitUnder === "Commissioning") {
-          if (!isDept1) {
-            return showError("Only COMM role can approve Commissioning permits under Commissioning.");
+      if (status === "Opened") {
+        if (!canUserOpen(row)) {
+          const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+          const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+          if (pUnder === "construction" && pType === "construction") {
+            return showError("Only CONM role can open Construction-only permits.");
           }
+          if (pUnder === "commissioning" && pType === "commissioning") {
+            return showError("Only COMM role can open Commissioning-only permits.");
+          }
+          return showError("You do not have permission to open this permit.");
         }
-        // Approve: Construction + Construction -> CONM (isDept) approves
-        else if (permitType === "Construction" && permitUnder === "Construction") {
-          if (!isDept) {
-            return showError("Only CONM role can approve Construction permits under Construction.");
+      }
+
+      if (status === "Closed") {
+        if (!canUserClose(row)) {
+          const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+          const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+          if (pUnder === "construction" && pType === "construction") {
+            return showError("Only CONM role can close Construction-only permits.");
           }
+          if (pUnder === "commissioning" && pType === "commissioning") {
+            return showError("Only COMM role can close Commissioning-only permits.");
+          }
+          return showError("You do not have permission to close this permit.");
         }
-        // Approve: Construction + Commissioning (from Pre-Approved) -> COMM (isDept1) approves
-        else if (permitType === "Construction" && permitUnder === "Commissioning") {
-          if (!isDept1) {
-            return showError("Only COMM role can approve Construction permits under Commissioning.");
+      }
+
+      if (status === "Rejected") {
+        if (!canUserReject(row)) {
+          const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+          const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+          if (pUnder === "construction" && pType === "construction") {
+            return showError("Only CONM role can reject Construction-only permits.");
           }
-        }
-        // Approve: Commissioning + Construction (from Pre-Approved) -> CONM (isDept) approves
-        else if (permitType === "Commissioning" && permitUnder === "Construction") {
-          if (!isDept) {
-            return showError("Only CONM role can approve Commissioning permits under Construction.");
+          if (pUnder === "commissioning" && pType === "commissioning") {
+            return showError("Only COMM role can reject Commissioning-only permits.");
           }
+          return showError("You do not have permission to reject this permit.");
         }
       }
     }
@@ -1713,6 +2761,48 @@ const getInitialPage = () => {
     }
   };
 
+  const promptApprovedAction = async (row) => {
+    const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+    const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+    const isBothConstruction = (pUnder === "construction" && pType === "construction");
+    const isBothCommissioning = (pUnder === "commissioning" && pType === "commissioning");
+    const isMixed =
+      (pUnder === "construction" && pType === "commissioning") ||
+      (pUnder === "commissioning" && pType === "construction");
+
+    if (!isAdmin && !isMultiDept && !isSubcontractor) {
+      if (isBothConstruction && !isDept) {
+        return showError("Only CONM role can open or reject Construction-only permits.");
+      }
+      if (isBothCommissioning && !isDept1) {
+        return showError("Only COMM role can open or reject Commissioning-only permits.");
+      }
+      if (isMixed && !isDept && !isDept1) {
+        return showError("Only CONM or COMM role can open or reject this permit.");
+      }
+    }
+
+    const result = await Swal.fire({
+      title: "Approved Permit Action",
+      text: `Select an action to perform on Permit ${row.PermitNo ? '#' + row.PermitNo : '#' + row.id}`,
+      icon: "question",
+      showCancelButton: true,
+      showDenyButton: true,
+      confirmButtonText: "Open Permit",
+      confirmButtonColor: "#10b981",
+      denyButtonText: "Reject Permit",
+      denyButtonColor: "#ef4444",
+      cancelButtonText: "Cancel",
+      cancelButtonColor: "#6b7280"
+    });
+
+    if (result.isConfirmed) {
+      handleStatusTransition(row, "Opened");
+    } else if (result.isDenied) {
+      handleStatusTransition(row, "Rejected");
+    }
+  };
+
   const handleStatusSubmit = async (e) => {
     e.preventDefault();
     if (!modalTarget) return;
@@ -1731,15 +2821,47 @@ const getInitialPage = () => {
       createdTime: getDenmarkTimeISOString()
     };
 
-
-
     if (nextStatus === "Rejected") {
       if (!rejectReason.trim()) return showError("Please specify rejection reason.");
       payload.reject_reason = rejectReason.trim();
+
+      if (!isAdmin && !isMultiDept && !isSubcontractor) {
+        const permitType = (modalTarget.permit_type || modalTarget.permitType || "").trim();
+        const permitUnder = (modalTarget.permit_under || modalTarget.permitUnder || "").trim();
+        const isBothConstruction = (permitUnder === "Construction" && permitType === "Construction");
+        const isBothCommissioning = (permitUnder === "Commissioning" && permitType === "Commissioning");
+        const isMixed =
+          (permitUnder === "Construction" && permitType === "Commissioning") ||
+          (permitUnder === "Commissioning" && permitType === "Construction");
+
+        const curStatus = modalTarget?.Request_status || modalTarget?.request_status || "";
+        if (curStatus === "Approved" || curStatus === "Pre-Approved" || curStatus === "Hold") {
+          if (isBothConstruction && !isDept) {
+            return showError("Only CONM role can reject Construction-only permits.");
+          }
+          if (isBothCommissioning && !isDept1) {
+            return showError("Only COMM role can reject Commissioning-only permits.");
+          }
+          if (isMixed && !isDept && !isDept1) {
+            return showError("Only CONM or COMM role can reject this permit.");
+          }
+        }
+      }
     } else if (nextStatus === "Cancelled") {
       if (!cancelReason.trim()) return showError("Please specify cancel reason.");
       payload.cancel_reason = cancelReason.trim();
     } else if (nextStatus === "Opened") {
+      if (!isAdmin && !isMultiDept && !canUserOpen(modalTarget)) {
+        const pType = (modalTarget.permit_type || modalTarget.permitType || "").trim().toLowerCase();
+        const pUnder = (modalTarget.permit_under || modalTarget.permitUnder || "").trim().toLowerCase();
+        if (pUnder === "construction" && pType === "construction") {
+          return showError("Only CONM role can open Construction-only permits.");
+        }
+        if (pUnder === "commissioning" && pType === "commissioning") {
+          return showError("Only COMM role can open Commissioning-only permits.");
+        }
+        return showError("You do not have permission to open this permit.");
+      }
       if (modalStatus === "Opened") {
         const workingDateVal = modalTarget?.Working_Date || modalTarget?.workingDate || modalTarget?.working_date || "";
         if (!isTodayDate(workingDateVal)) {
@@ -1765,26 +2887,62 @@ const getInitialPage = () => {
         payload.ConM_initials1 = modalTarget.ConM_initials1 || "";
       }
     } else if (nextStatus === "Closed") {
-      if (!closeNote.trim()) return showError("Please enter closing notes / remarks.");
-      payload.close_note = closeNote.trim();
-      if (modalTarget.Hot_work === 1) {
-        if (hHeatSource === "" || hHeatSource === null || hHeatSource === undefined) {
-          return showError("Please inspect the work area for smoldering materials or residual heat.");
+      const targetCurStatus = (modalTarget?.Request_status || modalTarget?.request_status || "").toLowerCase().trim();
+      const targetZoneChangeInfo =
+        targetCurStatus === "opened"
+          ? getPermitZoneStatusChangeInfo(modalTarget)
+          : { isChanged: false, currentStatusLabels: [], permitUnderLabel: "" };
+
+      if (targetZoneChangeInfo.isChanged) {
+        if (!isAdmin) {
+          const statusText =
+            targetZoneChangeInfo.currentStatusLabels.length > 0
+              ? ` (${targetZoneChangeInfo.currentStatusLabels.join(", ")})`
+              : "";
+          return showError(
+            `Cannot close this permit because the zone status has changed${statusText} from ${targetZoneChangeInfo.permitUnderLabel}. Only an Admin can close this permit with a close reason.`
+          );
         }
-        if (hWorkplaceCheck === "" || hWorkplaceCheck === null || hWorkplaceCheck === undefined) {
-          return showError("Please confirm if all tools and equipment have been removed.");
+        if (!closeReason.trim()) {
+          return showError("Please enter a close reason for closing this permit after zone status change.");
         }
-        if (hFireDetectors === "" || hFireDetectors === null || hFireDetectors === undefined) {
-          return showError("Please confirm if the area has been cleaned and restored.");
+        payload.close_reason = closeReason.trim();
+        if (closeNote.trim()) {
+          payload.close_note = closeNote.trim();
         }
-        if (!hStartTime || !hEndTime) {
-          return showError("Please specify check start and end times.");
+      } else {
+        if (!isAdmin && !isMultiDept && !isSubcontractor && !canUserClose(modalTarget)) {
+          const pType = (modalTarget.permit_type || modalTarget.permitType || "").trim().toLowerCase();
+          const pUnder = (modalTarget.permit_under || modalTarget.permitUnder || "").trim().toLowerCase();
+          if (pUnder === "construction" && pType === "construction") {
+            return showError("Only CONM role can close Construction-only permits.");
+          }
+          if (pUnder === "commissioning" && pType === "commissioning") {
+            return showError("Only COMM role can close Commissioning-only permits.");
+          }
+          return showError("You do not have permission to close this permit.");
         }
-        payload.h_heat_source = String(hHeatSource);
-        payload.h_workplace_check = String(hWorkplaceCheck);
-        payload.h_fire_detectors = String(hFireDetectors);
-        payload.h_start_time = hStartTime;
-        payload.h_end_time = hEndTime;
+        if (!closeNote.trim()) return showError("Please enter closing notes / remarks.");
+        payload.close_note = closeNote.trim();
+        if (modalTarget.Hot_work === 1) {
+          if (hHeatSource === "" || hHeatSource === null || hHeatSource === undefined) {
+            return showError("Please inspect the work area for smoldering materials or residual heat.");
+          }
+          if (hWorkplaceCheck === "" || hWorkplaceCheck === null || hWorkplaceCheck === undefined) {
+            return showError("Please confirm if all tools and equipment have been removed.");
+          }
+          if (hFireDetectors === "" || hFireDetectors === null || hFireDetectors === undefined) {
+            return showError("Please confirm if the area has been cleaned and restored.");
+          }
+          if (!hStartTime || !hEndTime) {
+            return showError("Please specify check start and end times.");
+          }
+          payload.h_heat_source = String(hHeatSource);
+          payload.h_workplace_check = String(hWorkplaceCheck);
+          payload.h_fire_detectors = String(hFireDetectors);
+          payload.h_start_time = hStartTime;
+          payload.h_end_time = hEndTime;
+        }
       }
     } else if (nextStatus === "Pre-Approved" || nextStatus === "Approved") {
       if (!initials.trim()) return showError("Initials signature is required.");
@@ -1827,23 +2985,7 @@ const getInitialPage = () => {
       await updateRequest(modalTarget.id, formData);
       showSuccess(`Status changed to ${nextStatus} successfully`);
       setActiveModal(null);
-      try {
-        const freshRes = await getRequestById(modalTarget.id);
-        const updatedItem = freshRes?.data || freshRes;
-        if (updatedItem && (updatedItem.id || updatedItem.Request_status)) {
-          setRequests((prev) =>
-            prev.map((r) => (r.id === modalTarget.id ? { ...r, ...updatedItem } : r))
-          );
-        } else {
-          setRequests((prev) =>
-            prev.map((r) => (r.id === modalTarget.id ? { ...r, ...payload, Request_status: nextStatus, requestStatus: nextStatus } : r))
-          );
-        }
-      } catch {
-        setRequests((prev) =>
-          prev.map((r) => (r.id === modalTarget.id ? { ...r, ...payload, Request_status: nextStatus, requestStatus: nextStatus } : r))
-        );
-      }
+      fetchRequests(currentPage);
     } catch (err) {
       const backendMsg = err?.response?.data?.message;
       const errMsg = Array.isArray(backendMsg)
@@ -1875,13 +3017,72 @@ const getInitialPage = () => {
     if (!validateBulkAction()) return;
     const targetRequests = requests.filter(r => selectedIds.includes(r.id));
 
-    const invalidApproved = targetRequests.find(
-      r => (r.Request_status === "Approved" || r.request_status === "Approved") &&
-        !isTodayDate(r.Working_Date || r.workingDate || r.working_date)
-    );
+    if (status === "Opened") {
+      const invalidApproved = targetRequests.find(
+        r => (r.Request_status === "Approved" || r.request_status === "Approved") &&
+          !isTodayDate(r.Working_Date || r.workingDate || r.working_date)
+      );
 
-    if (invalidApproved) {
-      return showError("Status change is restricted for Approved permits when working date is not today.");
+      if (invalidApproved) {
+        return showError("Status change to Opened is restricted for Approved permits when working date is not today.");
+      }
+
+      if (!isAdmin && !isMultiDept && !isSubcontractor) {
+        for (const r of targetRequests) {
+          if (!canUserOpen(r)) {
+            return showError(`Permit #${r.PermitNo || r.id}: You do not have permission to open this permit.`);
+          }
+        }
+      }
+    }
+
+    if ((status === "Pre-Approved" || status === "Approved") && !isAdmin && !isMultiDept) {
+      for (const r of targetRequests) {
+        if (!canUserApprove(r, status)) {
+          return showError(`Permit #${r.PermitNo || r.id}: You do not have permission to ${status === "Pre-Approved" ? "pre-approve" : "approve"} this permit.`);
+        }
+      }
+    }
+
+    if (status === "Closed" && !isAdmin && !isMultiDept && !isSubcontractor) {
+      for (const r of targetRequests) {
+        if (!canUserClose(r)) {
+          const pType = (r.permit_type || r.permitType || "").trim().toLowerCase();
+          const pUnder = (r.permit_under || r.permitUnder || "").trim().toLowerCase();
+          if (pUnder === "construction" && pType === "construction") {
+            return showError(`Permit #${r.PermitNo || r.id}: Only CONM role can close Construction-only permits.`);
+          }
+          if (pUnder === "commissioning" && pType === "commissioning") {
+            return showError(`Permit #${r.PermitNo || r.id}: Only COMM role can close Commissioning-only permits.`);
+          }
+          return showError(`Permit #${r.PermitNo || r.id}: You do not have permission to close this permit.`);
+        }
+      }
+    }
+
+    if (status === "Rejected" && !isAdmin) {
+      for (const r of targetRequests) {
+        const curStatus = (r.Request_status || r.request_status || "");
+        if (curStatus === "Approved" || curStatus === "Pre-Approved" || curStatus === "Hold") {
+          const pType = (r.permit_type || r.permitType || "").trim();
+          const pUnder = (r.permit_under || r.permitUnder || "").trim();
+          const isBothConst = (pUnder === "Construction" && pType === "Construction");
+          const isBothComm = (pUnder === "Commissioning" && pType === "Commissioning");
+          const isMixed =
+            (pUnder === "Construction" && pType === "Commissioning") ||
+            (pUnder === "Commissioning" && pType === "Construction");
+
+          if (isBothConst && !isDept) {
+            return showError(`Permit #${r.PermitNo || r.id}: Only CONM role can reject Construction-only permits.`);
+          }
+          if (isBothComm && !isDept1) {
+            return showError(`Permit #${r.PermitNo || r.id}: Only COMM role can reject Commissioning-only permits.`);
+          }
+          if (isMixed && !isDept && !isDept1) {
+            return showError(`Permit #${r.PermitNo || r.id}: Only CONM or COMM role can reject this permit.`);
+          }
+        }
+      }
     }
 
     setModalTarget(targetRequests);
@@ -2156,24 +3357,19 @@ const getInitialPage = () => {
       zone: zoneObjects
     };
 
-    setIsActionSubmitting(true);
-    setActionSubmittingText("Copying Work Permits...");
     try {
-      const res = await createByCount(payload);
-      if (res?.status >= 400 || res?.statusCode >= 400 || res?.data?.status >= 400) {
-        const errorMsg = res?.message || res?.data?.message || "Copy operation failed";
-        showError(errorMsg);
-        return;
-      }
+      await createByCount(payload);
       showSuccess("Permits copied successfully");
       setActiveModal(null);
       fetchRequests(currentPage);
-    } catch (err) {
-      const errorMsg = err?.response?.data?.message || err?.message || "Copy operation failed";
-      showError(errorMsg);
-    } finally {
-      setIsActionSubmitting(false);
-    }
+} catch (err) {
+  console.log("COPY ERR:", err, err?.response?.data);
+  const backendMsg = err?.response?.data?.message;
+  const errMsg = Array.isArray(backendMsg)
+    ? backendMsg.join(", ")
+    : (typeof backendMsg === "string" ? backendMsg : null) || err?.message || "Copy operation failed";
+  showError(errMsg);
+}
   };
 
   const selectableRequestsCount = useMemo(() => {
@@ -2181,12 +3377,17 @@ const getInitialPage = () => {
   }, [requests, checkIfHideCheckbox]);
 
   // ─── Table Configuration ──────────────────────────────────────────────────
-  const columns = [
+  const isOpsVisible = visibleColumns.includes("operationsCell");
+
+  const rawColumns = [
     {
       header: !isObserver && !isSubcontractor && (
         <input
           type="checkbox"
-          checked={selectableRequestsCount > 0 && selectedIds.length === selectableRequestsCount}
+          checked={
+            selectableRequestsCount > 0 &&
+            requests.filter(r => !checkIfHideCheckbox(r)).every(r => selectedIds.includes(r.id))
+          }
           onChange={(e) => handleSelectAll(e.target.checked)}
         />
       ),
@@ -2199,6 +3400,7 @@ const getInitialPage = () => {
     { header: "Permit Under", accessor: "permit_under" },
     { header: "Request Date", accessor: "Request_Date" },
     { header: "Permit Type", accessor: "permit_type" },
+    { header: "Type of Work", accessor: "work_type" },
     { header: "Activity", accessor: "Activity" },
     { header: "Contractor", accessor: "contractorName" },
     { header: "Building", accessor: "buildingName" },
@@ -2209,14 +3411,29 @@ const getInitialPage = () => {
     { header: "Time", accessor: "timeCell" },
     { header: "Working After Midnight", accessor: "nightShiftCell" },
     { header: "New End Time", accessor: "newEndTimeCell" },
-    { header: "Status", accessor: "statusCell", className: "sticky-col-status" },
-    { header: "Operations", accessor: "operationsCell", className: "sticky-col-operations", style: { width: "180px", minWidth: "180px", maxWidth: "180px" } }
-  ].filter(col => {
-    if (col.accessor === "checkboxCell" && (isObserver || isSubcontractor)) {
-      return false;
+    {
+      header: "Status",
+      accessor: "statusCell",
+      className: isOpsVisible ? "sticky-col-status" : "sticky-col-status sticky-col-status--at-edge",
+      style: !isOpsVisible ? { right: 0 } : undefined
+    },
+    {
+      header: "Operations",
+      accessor: "operationsCell",
+      className: "sticky-col-operations",
+      style: { width: "180px", minWidth: "180px", maxWidth: "180px" }
     }
-    return true;
-  });
+  ];
+
+  const columns = useMemo(() => {
+    return rawColumns.filter(col => {
+      if (col.accessor === "checkboxCell") {
+        if (isObserver || isSubcontractor) return false;
+        return true;
+      }
+      return visibleColumns.includes(col.accessor);
+    });
+  }, [rawColumns, isObserver, isSubcontractor, visibleColumns]);
 
   const tableData = useMemo(() => {
     return requests.map((row) => {
@@ -2264,14 +3481,15 @@ const getInitialPage = () => {
         </div>
       );
 
-      const isDept1Commissioning = isDept1 && (
-        String(row.permit_under).toLowerCase() === "commissioning" ||
-        String(row.permit_type).toLowerCase() === "commissioning"
-      );
+      const pUnder = (row.permit_under || row.permitUnder || "Construction").toString().trim().toLowerCase();
+      const pType = (row.permit_type || row.permitType || "Construction").toString().trim().toLowerCase();
+      const isDept1Commissioning = isDept1 && (pUnder === "commissioning" || pType === "commissioning");
+      const isDeptConstruction = isDept && (pUnder === "construction" || pType === "construction");
 
       const isMultiDept = isDept && isDept1;
 
       const isEditable = (() => {
+        if (isObserver) return false;
         const isStatusAllowed = row.Request_status !== "Cancelled" &&
           row.Request_status !== "Closed" &&
           row.Request_status !== "Rejected" &&
@@ -2280,21 +3498,16 @@ const getInitialPage = () => {
           currentUser?.role !== "Observer";
 
         if (!isStatusAllowed) return false;
-
         if (isSubcontractor) {
           return row.Request_status === "Draft";
         }
-
         if (row.Request_status === "Opened") {
           if (!isAdmin && !isDept && !isDept1 && !isMultiDept) return false;
         }
-
         if (isAdmin || isMultiDept) return true;
 
         if (isDept) {
-          const eitherIsConstruction = String(row.permit_under).toLowerCase() === "construction" ||
-                                        String(row.permit_type).toLowerCase() === "construction";
-          return eitherIsConstruction;
+          return isDeptConstruction;
         }
 
         if (isDept1) {
@@ -2305,6 +3518,7 @@ const getInitialPage = () => {
       })();
 
       const isDeletable = (() => {
+        if (isObserver) return false;
         if (isDept || isDept1 || isMultiDept) return false;
         if (isAdmin) return true;
 
@@ -2312,19 +3526,15 @@ const getInitialPage = () => {
       })();
 
       const isCopyable = (() => {
-        if (currentUser?.role === "Observer") return false;
+        if (isObserver || currentUser?.role === "Observer") return false;
         if (isAdmin || isSubcontractor || isMultiDept) return true;
 
         if (isDept) {
-          const eitherIsConstruction = String(row.permit_under).toLowerCase() === "construction" ||
-                                        String(row.permit_type).toLowerCase() === "construction";
-          return eitherIsConstruction;
+          return isDeptConstruction;
         }
 
         if (isDept1) {
-          const bothAreConstruction = String(row.permit_under).toLowerCase() === "construction" &&
-                                       String(row.permit_type).toLowerCase() === "construction";
-          return !bothAreConstruction;
+          return isDept1Commissioning;
         }
 
         return false;
@@ -2333,7 +3543,13 @@ const getInitialPage = () => {
       // Status chip render
       const statusClass = `status-badge status-badge--${row.Request_status?.toLowerCase().replace(" ", "-")}`;
 
+      const rowZoneChangeInfo =
+        row.Request_status === "Opened"
+          ? getPermitZoneStatusChangeInfo(row)
+          : { isChanged: false, currentStatusLabels: [], permitUnderLabel: "" };
+
       const handleStatusClick = () => {
+        if (isObserver) return;
         // If status is Draft, click opens edit form
         if (row.Request_status === "Draft") {
           if (isEditable) {
@@ -2368,18 +3584,50 @@ const getInitialPage = () => {
           } else if (row.Request_status === "Pre-Approved") {
             handleStatusTransition(row, "Approved");
           } else if (row.Request_status === "Approved") {
-            handleStatusTransition(row, "Opened");
+            promptApprovedAction(row);
           } else if (row.Request_status === "Opened") {
+            if (rowZoneChangeInfo.isChanged) {
+              if (!isAdmin) {
+                const statusText =
+                  rowZoneChangeInfo.currentStatusLabels.length > 0
+                    ? ` (${rowZoneChangeInfo.currentStatusLabels.join(", ")})`
+                    : "";
+                return showError(
+                  `Cannot close this permit because the zone status has changed${statusText} from ${rowZoneChangeInfo.permitUnderLabel}. Only an Admin can close this permit with a close reason.`
+                );
+              }
+              handleStatusTransition(row, "Closed");
+              return;
+            }
+            if (!canUserClose(row)) {
+              const pType = (row.permit_type || row.permitType || "").trim().toLowerCase();
+              const pUnder = (row.permit_under || row.permitUnder || "").trim().toLowerCase();
+              if (pUnder === "construction" && pType === "construction") {
+                return showError("Only CONM role can close Construction-only permits.");
+              }
+              if (pUnder === "commissioning" && pType === "commissioning") {
+                return showError("Only COMM role can close Commissioning-only permits.");
+              }
+              return showError("You do not have permission to close this permit.");
+            }
             handleStatusTransition(row, "Closed");
           }
         }
       };
 
+      const statusTooltip =
+        row.Request_status === "Opened" && rowZoneChangeInfo.isChanged
+          ? isAdmin
+            ? `Zone status changed (${rowZoneChangeInfo.currentStatusLabels.join(", ")}) — click to close as Admin with a close reason`
+            : `Zone status changed (${rowZoneChangeInfo.currentStatusLabels.join(", ")}) — only Admin can close this permit`
+          : undefined;
+
       const statusCell = (
         <span
           className={statusClass}
-          onClick={handleStatusClick}
-          style={{ cursor: "pointer" }}
+          onClick={isObserver ? undefined : handleStatusClick}
+          style={{ cursor: isObserver ? "default" : "pointer" }}
+          title={statusTooltip}
         >
           {row.Request_status}
         </span>
@@ -2459,6 +3707,7 @@ const getInitialPage = () => {
         Request_Date: formatDateToDDMMYYYY(row.Request_Date),
         Working_Date: formatDateToDDMMYYYY(row.Working_Date),
         Activity: trimLongValue(row.Activity, 30),
+        work_type: resolveTypeOfWork(row),
         timeCell,
         nightShiftCell,
         newEndTimeCell,
@@ -2467,7 +3716,26 @@ const getInitialPage = () => {
         operationsCell
       };
     });
-  }, [requests, selectedIds, contractors, buildingsList, isSubcontractor, canBulkAction, isAdmin, currentUser]);
+  }, [requests, selectedIds, contractors, buildingsList, isSubcontractor, canBulkAction, isAdmin, currentUser, isDept, isDept1, isMultiDept, checkIfHideCheckbox, getPermitZoneStatusChangeInfo]);
+
+  const modalZoneChangeInfo = useMemo(() => {
+    if (
+      modalStatus === "Closed" &&
+      modalTarget &&
+      !Array.isArray(modalTarget) &&
+      (modalTarget.Request_status || modalTarget.request_status || "").toLowerCase().trim() === "opened"
+    ) {
+      return getPermitZoneStatusChangeInfo(modalTarget);
+    }
+    return {
+      isChanged: false,
+      currentStatuses: [],
+      currentStatusLabels: [],
+      permitUnderLabel: "",
+    };
+  }, [modalStatus, modalTarget, getPermitZoneStatusChangeInfo]);
+
+  const isAdminZoneChangeClose = modalStatus === "Closed" && isAdmin && modalZoneChangeInfo.isChanged;
 
   const totalPages = Math.ceil(totalCount / limit);
 
@@ -2581,7 +3849,7 @@ const getInitialPage = () => {
                   <input
                     type="text"
                     className="df-input df-readonly"
-                    value={contractors.length > 0 ? (contractors.find(c => String(c.id) === String(currentUser?.typeId))?.subContractorName || contractors[0]?.subContractorName) : "Loading..."}
+                    value={contractors.length > 0 ? (contractors.find(c => String(c.id) === String(userContractorId))?.subContractorName || contractors[0]?.subContractorName) : "Loading..."}
                     readOnly
                   />
                 ) : (
@@ -2883,15 +4151,17 @@ const getInitialPage = () => {
                 />
               </div>
 
-              {(isDept1 || isAdmin || isMultiDept) && (
+              {/* Row 9: Electrical Works | Mechanical Works (C&Q / Commissioning / Admin only) */}
+              {(isAdmin || isDept1 || isMultiDept) && (
                 <>
                   <div className="df-field">
                     <label className="df-label">Electrical Works</label>
-                    <MultiSelectDropdown
+                    <ElectricalWorksDropdown
+                      options={electricalWorksList}
+                      selectedValues={searchFilters.electricalWorks || []}
+                      onChange={(vals) => setSearchFilters(prev => ({ ...prev, electricalWorks: vals }))}
                       placeholder="Select Electrical Works"
-                      options={electricalWorksOptions}
-                      selectedValues={searchFilters.electrical_works || []}
-                      onChange={(vals) => setSearchFilters(prev => ({ ...prev, electrical_works: vals }))}
+                      searchPlaceholder="Search panel or system number..."
                     />
                   </div>
 
@@ -2899,9 +4169,10 @@ const getInitialPage = () => {
                     <label className="df-label">Mechanical Works</label>
                     <MultiSelectDropdown
                       placeholder="Select Mechanical Works"
+                      searchPlaceholder="Search mechanical work..."
                       options={mechanicalWorksOptions}
-                      selectedValues={searchFilters.mechanical_works || []}
-                      onChange={(vals) => setSearchFilters(prev => ({ ...prev, mechanical_works: vals }))}
+                      selectedValues={searchFilters.mechanicalWorks || []}
+                      onChange={(vals) => setSearchFilters(prev => ({ ...prev, mechanicalWorks: vals }))}
                     />
                   </div>
                 </>
@@ -2965,7 +4236,7 @@ const getInitialPage = () => {
 
                 {/* Operations Dropdown */}
                 <div className="bulk-edit-dropdown-container" ref={bulkDropdownRef}>
-                  <button 
+                  <button
                     type="button"
                     className="bat-btn bat-btn--edit"
                     onClick={(e) => {
@@ -2977,7 +4248,7 @@ const getInitialPage = () => {
                   </button>
                   {bulkDropdownOpen && (
                     <div className="bulk-edit-dropdown-menu" style={{ display: "block" }}>
-                      <button 
+                      <button
                         type="button"
                         onClick={() => {
                           handleBulkTimeEdit();
@@ -2986,7 +4257,7 @@ const getInitialPage = () => {
                       >
                         Shift &amp; Working Time
                       </button>
-                      <button 
+                      <button
                         type="button"
                         onClick={() => {
                           handleBulkSafetyEdit();
@@ -2995,7 +4266,7 @@ const getInitialPage = () => {
                       >
                         Safety Precautions
                       </button>
-                      <button 
+                      <button
                         type="button"
                         onClick={() => {
                           handleBulkNotesEdit();
@@ -3033,6 +4304,115 @@ const getInitialPage = () => {
 
       {/* Data Table */}
       <div className="dept-table-card" style={{ marginTop: "16px" }}>
+        <div className="table-toolbar-header">
+          <div className="table-toolbar-header__left">
+            <span className="table-toolbar-count">
+              Total Permits: <strong>{totalCount}</strong>
+            </span>
+          </div>
+          <div className="table-toolbar-header__right">
+            {/* Columns Visibility Dropdown */}
+            <div className="col-visibility-dropdown-container" ref={colDropdownRef}>
+              <button
+                type="button"
+                className={`col-visibility-toggle-btn ${visibleColumns.length < ALL_COLUMNS_CONFIG.length ? "col-visibility-btn--active" : ""}`}
+                onClick={() => setColDropdownOpen(p => !p)}
+                title="Customize table columns"
+              >
+                <FaColumns />
+                <span>Columns</span>
+                <span className="col-visibility-count-badge">
+                  {visibleColumns.length}/{ALL_COLUMNS_CONFIG.length}
+                </span>
+              </button>
+
+              {colDropdownOpen && (
+                <div className="col-visibility-menu">
+                  <div className="col-visibility-header">
+                    <div>
+                      <div className="col-visibility-title">Customize Columns</div>
+                      <div className="col-visibility-subtitle">
+                        {visibleColumns.length} of {ALL_COLUMNS_CONFIG.length} columns displayed
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="col-visibility-close-btn"
+                      onClick={() => setColDropdownOpen(false)}
+                      title="Close"
+                    >
+                      <FaTimes />
+                    </button>
+                  </div>
+
+                  <div className="col-visibility-actions">
+                    <button
+                      type="button"
+                      className="col-vis-action-link"
+                      onClick={handleShowAllColumns}
+                    >
+                      Show All
+                    </button>
+                    <button
+                      type="button"
+                      className="col-vis-action-link col-vis-action-link--reset"
+                      onClick={handleResetColumns}
+                    >
+                      <FaUndo style={{ fontSize: "11px", marginRight: "4px" }} />
+                      Reset
+                    </button>
+                  </div>
+
+                  <div className="col-visibility-search">
+                    <FaSearch className="col-vis-search-icon" />
+                    <input
+                      type="text"
+                      className="col-vis-search-input"
+                      placeholder="Search columns..."
+                      value={columnSearch}
+                      onChange={(e) => setColumnSearch(e.target.value)}
+                    />
+                    {columnSearch && (
+                      <button
+                        type="button"
+                        className="col-vis-search-clear"
+                        onClick={() => setColumnSearch("")}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="col-visibility-list">
+                    {ALL_COLUMNS_CONFIG
+                      .filter(c => c.label.toLowerCase().includes(columnSearch.toLowerCase().trim()))
+                      .map((col) => {
+                        const isChecked = visibleColumns.includes(col.id);
+                        return (
+                          <label
+                            key={col.id}
+                            className={`col-vis-item ${isChecked ? "col-vis-item--checked" : ""}`}
+                          >
+                            <input
+                              type="checkbox"
+                              className="col-vis-checkbox"
+                              checked={isChecked}
+                              onChange={() => handleToggleColumn(col.id)}
+                            />
+                            <span className="col-vis-item-label">{col.label}</span>
+                            <span className={`col-vis-status-tag ${isChecked ? "col-vis-status-tag--visible" : "col-vis-status-tag--hidden"}`}>
+                              {isChecked ? "Visible" : "Hidden"}
+                            </span>
+                          </label>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
         <Table
           columns={columns}
           data={tableData}
@@ -3102,9 +4482,9 @@ const getInitialPage = () => {
       <Modal
         open={activeModal === "status"}
         onClose={() => setActiveModal(null)}
-        title={`Request Status Change: ${modalStatus}`}
+        title={`Request Status Change: ${((modalStatus === "Pre-Approved" || modalStatus === "Approved") && approveActionType === "Reject") || modalStatus === "Rejected" ? "Rejected" : modalStatus}`}
         size="md"
-        type={modalStatus === "Rejected" ? "danger" : "default"}
+        type={((modalStatus === "Pre-Approved" || modalStatus === "Approved") && approveActionType === "Reject") || modalStatus === "Rejected" ? "danger" : "default"}
         scrollable={true}
       >
         {modalTarget && (
@@ -3134,7 +4514,27 @@ const getInitialPage = () => {
               )}
 
               {/* Closing Confirmation Declaration */}
-              {modalStatus === "Closed" && (
+              {modalStatus === "Closed" && isAdminZoneChangeClose && (
+                <div style={{
+                  background: "rgba(245, 158, 11, 0.14)",
+                  borderLeft: "4px solid #f59e0b",
+                  padding: "12px 16px",
+                  borderRadius: "6px",
+                  marginBottom: "16px",
+                  color: "var(--text-h, inherit)",
+                  fontSize: "13px",
+                  fontWeight: "500",
+                  lineHeight: "1.5"
+                }}>
+                  <div style={{ fontWeight: "700", marginBottom: "4px", color: "#f59e0b" }}>
+                    Zone Status Changed — Admin Close Override
+                  </div>
+                  This permit was created under <strong>{modalZoneChangeInfo.permitUnderLabel}</strong>, but the zone status is now{" "}
+                  <strong>{modalZoneChangeInfo.currentStatusLabels.join(", ") || "Changed"}</strong>. Regular users are restricted from closing this permit. Please enter a close reason below to close it as Admin.
+                </div>
+              )}
+
+              {modalStatus === "Closed" && !isAdminZoneChangeClose && (
                 <div style={{
                   background: "rgba(16, 185, 129, 0.12)",
                   borderLeft: "4px solid #10b981",
@@ -3157,13 +4557,25 @@ const getInitialPage = () => {
                   <select
                     className="df-select"
                     value={approveActionType}
-                    onChange={(e) => setApproveActionType(e.target.value)}
+                    onChange={(e) => {
+                      setApproveActionType(e.target.value);
+                      setSubmitStatusOverride(null);
+                    }}
                   >
-                    <option value="Approve">
-                      {modalStatus === "Pre-Approved" ? "Pre-Approve Permit" : "Approve Permit"}
-                    </option>
-                    <option value="Reject">Reject Permit</option>
+                    {canUserApprove(modalTarget, modalStatus) && (
+                      <option value="Approve">
+                        {modalStatus === "Pre-Approved" ? "Pre-Approve Permit" : "Approve Permit"}
+                      </option>
+                    )}
+                    {canUserReject(modalTarget) && (
+                      <option value="Reject">Reject Permit</option>
+                    )}
                   </select>
+                  {!canUserApprove(modalTarget, modalStatus) && canUserReject(modalTarget) && (
+                    <p style={{ color: "#f59e0b", fontSize: "12px", marginTop: "6px" }}>
+                      Note: You are not authorized to {modalStatus === "Pre-Approved" ? "pre-approve" : "final approve"} this permit, but you have authority to reject it.
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -3324,11 +4736,34 @@ const getInitialPage = () => {
                 </div>
               )}
 
+              {/* Admin Close Reason (when zone status changed) */}
+              {isAdminZoneChangeClose && (
+                <div className="df-field" style={{ marginBottom: "16px" }}>
+                  <label className="df-label">
+                    Close Reason <span className="df-required">*</span>
+                  </label>
+                  <textarea
+                    required
+                    placeholder="Enter reason for closing this permit after zone status change..."
+                    className="df-textarea"
+                    rows={3}
+                    value={closeReason}
+                    onChange={(e) => setCloseReason(e.target.value)}
+                  />
+                </div>
+              )}
+
               {/* Close Checklist note */}
               {modalStatus === "Closed" && (
                 <div className="df-field" style={{ marginBottom: "16px" }}>
                   <label className="df-label">
-                    Closing Notes / Remarks <span className="df-required">*</span>
+                    {isAdminZoneChangeClose ? (
+                      <>Closing Notes / Remarks (Optional)</>
+                    ) : (
+                      <>
+                        Closing Notes / Remarks <span className="df-required">*</span>
+                      </>
+                    )}
                   </label>
                   <textarea
                     placeholder="Enter comments on close-out checklists..."
@@ -3412,7 +4847,7 @@ const getInitialPage = () => {
               )}
 
               {/* Hot Work closing check list */}
-              {modalStatus === "Closed" && modalTarget.Hot_work === 1 && (
+              {modalStatus === "Closed" && !isAdminZoneChangeClose && modalTarget.Hot_work === 1 && (
                 <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", padding: "16px", background: "rgba(255,255,255,0.02)", marginBottom: "16px" }}>
                   <h4 style={{ color: "#00e5a0", fontSize: "13px", margin: "0 0 12px 0", textTransform: "uppercase", letterSpacing: "0.5px" }}>Hot Work Closing Workplace Check</h4>
 
@@ -3570,21 +5005,36 @@ const getInitialPage = () => {
               </button>
               {modalStatus === "Closed" ? (
                 <>
-                  <button
-                    type="submit"
-                    className="df-btn df-btn--secondary"
-                    onClick={() => setSubmitStatusOverride("Opened")}
-                  >
-                    Update Status
-                  </button>
+                  {!isAdminZoneChangeClose && (
+                    <button
+                      type="submit"
+                      className="df-btn df-btn--secondary"
+                      onClick={() => setSubmitStatusOverride("Opened")}
+                    >
+                      Update Status
+                    </button>
+                  )}
                   <button
                     type="submit"
                     className="df-btn df-btn--submit"
                     onClick={() => setSubmitStatusOverride("Closed")}
                   >
-                    Close Permit
+                    {isAdminZoneChangeClose ? "Close Permit (Admin Override)" : "Close Permit"}
                   </button>
                 </>
+              ) : (((modalStatus === "Pre-Approved" || modalStatus === "Approved") && approveActionType === "Reject") || modalStatus === "Rejected") ? (
+                <button
+                  type="submit"
+                  className="df-btn"
+                  style={{
+                    backgroundColor: "#ef4444",
+                    borderColor: "#ef4444",
+                    color: "#ffffff",
+                    fontWeight: "600"
+                  }}
+                >
+                  Reject Permit
+                </button>
               ) : (
                 <button type="submit" className="df-btn df-btn--submit">
                   Confirm Status Transition
@@ -4099,22 +5549,11 @@ const getInitialPage = () => {
             </div>
 
             <div className="df-footer" style={{ marginTop: "24px" }}>
-              <button type="button" className="df-btn df-btn--cancel" onClick={() => setActiveModal(null)} disabled={isActionSubmitting}>
+              <button type="button" className="df-btn df-btn--cancel" onClick={() => setActiveModal(null)}>
                 Cancel
               </button>
-              <button type="submit" className="df-btn df-btn--submit" disabled={isActionSubmitting} style={{ display: "inline-flex", alignItems: "center", gap: "8px" }}>
-                {isActionSubmitting && (
-                  <span style={{
-                    width: "16px",
-                    height: "16px",
-                    border: "2px solid rgba(255,255,255,0.3)",
-                    borderTop: "2px solid #ffffff",
-                    borderRadius: "50%",
-                    display: "inline-block",
-                    animation: "spin 0.8s linear infinite"
-                  }} />
-                )}
-                {isActionSubmitting ? "Copying Permits..." : "Copy Permits"}
+              <button type="submit" className="df-btn df-btn--submit">
+                Copy Permits
               </button>
             </div>
           </form>
@@ -4160,46 +5599,6 @@ const getInitialPage = () => {
           </div>
         )}
       </Modal>
-
-      {/* Action Submitting Overlay Loader */}
-      {isActionSubmitting && ReactDOM.createPortal(
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(15, 23, 42, 0.85)",
-          backdropFilter: "blur(8px)",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 999999999,
-          color: "#ffffff"
-        }}>
-          <div style={{
-            width: "56px",
-            height: "56px",
-            border: "4px solid rgba(0, 229, 160, 0.2)",
-            borderTop: "4px solid #00e5a0",
-            borderRadius: "50%",
-            animation: "spin 0.8s linear infinite",
-            marginBottom: "20px"
-          }} />
-          <style>{`
-            @keyframes spin {
-              0% { transform: rotate(0deg); }
-              100% { transform: rotate(360deg); }
-            }
-          `}</style>
-          <h3 style={{ fontSize: "20px", fontWeight: "600", marginBottom: "8px", color: "#f9fafb" }}>
-            {actionSubmittingText || "Processing Request..."}
-          </h3>
-          <p style={{ color: "#9ca3af", fontSize: "14px" }}>Please wait while processing...</p>
-        </div>,
-        document.body
-      )}
     </div>
   );
 };

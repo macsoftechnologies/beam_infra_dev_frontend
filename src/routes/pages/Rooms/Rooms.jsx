@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback } from "react";
-import ReactDOM from "react-dom";
 import { showSuccess, showError, showDeleteConfirm, showDeleteSuccess } from "../../components/common/Toast/Toast";
 import Table from "../../components/common/Table/Table";
 import Modal from "../../components/common/Modal/Modal";
@@ -14,8 +13,6 @@ const Rooms = () => {
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [selectedRoom, setSelectedRoom] = useState(null);
-  const [isActionSubmitting, setIsActionSubmitting] = useState(false);
-  const [actionSubmittingText, setActionSubmittingText] = useState("");
   const [roomList, setRoomList] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageLimit] = useState(PAGE_LIMIT_DEFAULT);
@@ -120,8 +117,6 @@ const Rooms = () => {
   const handleDelete = async (item) => {
     const result = await showDeleteConfirm();
     if (!result.isConfirmed) return;
-    setIsActionSubmitting(true);
-    setActionSubmittingText("Deleting Room...");
     try {
       await deleteRoom(item.room_id ?? item.id);
       showDeleteSuccess();
@@ -132,71 +127,25 @@ const Rooms = () => {
       fetchRoomsList(newPage, appliedRoomName);
     } catch (err) {
       showError("Failed to delete room");
-    } finally {
-      setIsActionSubmitting(false);
     }
   };
 
   const handleSubmit = async (formData) => {
-    setIsActionSubmitting(true);
-    setActionSubmittingText(selectedRoom && editOpen ? "Updating Room..." : "Adding Room...");
     try {
       if (selectedRoom && editOpen) {
-        const targetId = selectedRoom.room_id ?? selectedRoom.id;
-        const res = await updateRoom(targetId, formData);
+        await updateRoom(selectedRoom.room_id ?? selectedRoom.id, formData);
         showSuccess("Room updated successfully");
         setEditOpen(false);
         setSelectedRoom(null);
-        const updatedObj = res?.data || res || {};
-        setRoomList((prev) =>
-          prev.map((r) =>
-            (r.room_id ?? r.id) === targetId
-              ? { ...r, ...formData, ...updatedObj }
-              : r
-          )
-        );
       } else {
         await addRoom(formData);
         showSuccess("Room added successfully");
         setOpen(false);
-        fetchRoomsList(currentPage, appliedRoomName);
       }
+      fetchRoomsList(currentPage, appliedRoomName);
     } catch (err) {
       showError("Operation failed");
-    } finally {
-      setIsActionSubmitting(false);
     }
-  };
-
-  const handleStatusChange = async (item, newStatus) => {
-    const targetId = item.room_id ?? item.id;
-    setIsActionSubmitting(true);
-    setActionSubmittingText("Updating Room Status...");
-    try {
-      await updateRoom(targetId, {
-        building_id: item.building_id,
-        fl_id: item.fl_id,
-        zone_id: item.zone_id,
-        room_name: item.room_name,
-        status: newStatus
-      });
-      showSuccess("Room status updated successfully");
-      setRoomList((prev) =>
-        prev.map((r) =>
-          (r.room_id ?? r.id) === targetId ? { ...r, status: newStatus } : r
-        )
-      );
-    } catch (err) {
-      showError("Failed to update room status");
-    } finally {
-      setIsActionSubmitting(false);
-    }
-  };
-
-  const statusLabelMap = {
-    UC: "Construction",
-    C: "Commissioning",
-    HO: "Hand Over",
   };
 
   // ─── Table columns ────────────────────────────────────────────────────────
@@ -206,62 +155,13 @@ const Rooms = () => {
     { header: "Floor / Level", accessor: "floorName" },
     { header: "Zone Name", accessor: "zoneName" },
     { header: "Room Name", accessor: "room_name" },
-    { header: "Status", accessor: "statusBadge" },
   ];
 
-  const tableData = (Array.isArray(roomList) ? roomList : []).map((item, index) => {
+  const tableData = roomList.map((item, index) => {
     const flObj = floorMap[item.fl_id];
     const floorName = flObj ? flObj.floor_name : "—";
     const buildingName = item.building_id ? (buildingMap[item.building_id] || "—") : (flObj ? (buildingMap[flObj.build_id] || "—") : "—");
     const zoneName = zoneMap[item.zone_id] || "—";
-    const rawStatus = item.status || "UC";
-
-    const statusConfig = {
-      UC: {
-        bg: "rgba(37, 99, 235, 0.1)",
-        color: "#1d4ed8",
-        border: "1px solid rgba(37, 99, 235, 0.3)",
-      },
-      C: {
-        bg: "rgba(147, 51, 234, 0.1)",
-        color: "#6b21a8",
-        border: "1px solid rgba(147, 51, 234, 0.3)",
-      },
-      HO: {
-        bg: "rgba(22, 163, 74, 0.1)",
-        color: "#15803d",
-        border: "1px solid rgba(22, 163, 74, 0.3)",
-      },
-    };
-
-    const currentCfg = statusConfig[rawStatus] || statusConfig.UC;
-
-    const statusBadge = (
-      <select
-        value={rawStatus}
-        onChange={(e) => handleStatusChange(item, e.target.value)}
-        style={{
-          appearance: "none",
-          WebkitAppearance: "none",
-          MozAppearance: "none",
-          padding: "6px 26px 6px 12px",
-          fontSize: "0.81rem",
-          fontWeight: "600",
-          borderRadius: "20px",
-          cursor: "pointer",
-          outline: "none",
-          background: `${currentCfg.bg} url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23374151' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E") no-repeat right 9px center`,
-          color: currentCfg.color,
-          border: currentCfg.border,
-          boxShadow: "0 1px 2px rgba(0, 0, 0, 0.04)",
-          transition: "all 0.15s ease",
-        }}
-      >
-        <option value="UC">Construction</option>
-        <option value="C">Commissioning</option>
-        <option value="HO">Hand Over</option>
-      </select>
-    );
 
     return {
       ...item,
@@ -269,7 +169,6 @@ const Rooms = () => {
       floorName,
       buildingName,
       zoneName,
-      statusBadge,
     };
   });
 
@@ -285,17 +184,10 @@ const Rooms = () => {
             Manage and configure all room records
           </p>
         </div>
-        <div className="dept-page-header__right" style={{ display: "flex", gap: "12px", alignItems: "center" }}>
+        <div className="dept-page-header__right">
           <span className="dept-count-badge">
             {totalCount || roomList.length} Total
           </span>
-          <button
-            className="dept-add-btn"
-            onClick={() => setOpen(true)}
-            style={{ display: "flex", alignItems: "center", gap: "6px" }}
-          >
-            + Add Room
-          </button>
         </div>
       </div>
 
@@ -381,45 +273,6 @@ const Rooms = () => {
         />
       </Modal>
 
-      {/* Action Submitting Overlay Loader */}
-      {isActionSubmitting && ReactDOM.createPortal(
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: "rgba(15, 23, 42, 0.85)",
-          backdropFilter: "blur(8px)",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 999999999,
-          color: "#ffffff"
-        }}>
-          <div style={{
-            width: "56px",
-            height: "56px",
-            border: "4px solid rgba(0, 229, 160, 0.2)",
-            borderTop: "4px solid #00e5a0",
-            borderRadius: "50%",
-            animation: "spin 0.8s linear infinite",
-            marginBottom: "20px"
-          }} />
-          <style>{`
-            @keyframes spin {
-              0% { transform: rotate(0deg); }
-              100% { transform: rotate(360deg); }
-            }
-          `}</style>
-          <h3 style={{ fontSize: "20px", fontWeight: "600", marginBottom: "8px", color: "#f9fafb" }}>
-            {actionSubmittingText || "Processing..."}
-          </h3>
-          <p style={{ color: "#9ca3af", fontSize: "14px" }}>Please wait while processing...</p>
-        </div>,
-        document.body
-      )}
     </div>
   );
 };

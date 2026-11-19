@@ -1,15 +1,29 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { getContractors, getDepartments, getRoles } from "../../services/authService";
 import { showError } from "../../components/common/Toast/Toast";
+import {
+  MODULE_DEFINITIONS,
+  getModuleUserTypeOptions,
+  getUserTypeLabel,
+  parseModuleAccess,
+} from "../../utils/modulePermissions";
 import "../../forms/styles/forms.css";
 
-// ─── Employee Type options ───────────────────────────────────────────────────
-const EMPLOYEE_TYPE_OPTIONS = [
-  { value: "Department", label: "ConM/HSE" },
-  { value: "Department1", label: "C&Q" },
-  { value: "Subcontractor", label: "Contractor" },
-  { value: "Observer", label: "Observer" },
-];
+const EmailIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+    <polyline points="22,6 12,13 2,6" />
+  </svg>
+);
+
+const PhoneIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+    <line x1="12" y1="18" x2="12.01" y2="18" />
+  </svg>
+);
+
+const MODULE_OPTIONS = MODULE_DEFINITIONS;
 
 function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
   const [employeeBadgeId, setEmployeeBadgeId] = useState("");
@@ -17,33 +31,65 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
   const [designation, setDesignation] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [roleId, setRoleId] = useState("");
-  const [employeeTypes, setEmployeeTypes] = useState([]); // Array of strings (userType in backend)
   const [companyName, setCompanyName] = useState("");
-  const [subContId, setSubContId] = useState("");
+  const [subContId, setSubContId] = useState(() => {
+    if (isEdit && initialData && initialData.subContId !== undefined && initialData.subContId !== null) {
+      return String(initialData.subContId);
+    }
+    return "";
+  });
   const [departId, setDepartId] = useState("");
   const [obserId, setObserId] = useState("");
   const [access, setAccess] = useState(true);
+  const [selectedModules, setSelectedModules] = useState(() => {
+    if (isEdit && initialData) {
+      const rawModules = initialData.moduleAccess || initialData.module_access;
+      if (rawModules) {
+        const parsedMap = parseModuleAccess(rawModules);
+        const mods = Object.keys(parsedMap);
+        if (mods.length > 0) return mods;
+      }
+    }
+    return ["permit-to-work"];
+  });
+  const [moduleUserTypes, setModuleUserTypes] = useState(() => {
+    if (isEdit && initialData) {
+      const rawUserType = initialData.userType || "";
+      const initialTypes = rawUserType
+        ? (typeof rawUserType === "string" ? rawUserType.split(",") : Array.isArray(rawUserType) ? rawUserType : [rawUserType])
+        : [];
+      const rawModules = initialData.moduleAccess || initialData.module_access;
+      if (rawModules) {
+        const parsedMap = parseModuleAccess(rawModules);
+        const mods = Object.keys(parsedMap);
+        const typeMap = {};
+        mods.forEach((m) => {
+          let role = parsedMap[m] || initialTypes[0] || "Department";
+          if (m === "safety-inspection" && role === "Subcontractor") {
+            role = "Department";
+          } else if (m !== "permit-to-work" && role === "Department1") {
+            role = "Department";
+          }
+          typeMap[m] = role;
+        });
+        if (!typeMap["permit-to-work"] && initialTypes[0]) {
+          typeMap["permit-to-work"] = initialTypes[0];
+        }
+        return typeMap;
+      }
+      return { "permit-to-work": initialTypes[0] || "Department" };
+    }
+    return { "permit-to-work": "Department" };
+  });
   const [email, setEmail] = useState("");
+  const [enableEmailOtp, setEnableEmailOtp] = useState(false);
+  const [enableSmsOtp, setEnableSmsOtp] = useState(true);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
   const [rolesList, setRolesList] = useState([]);
   const [departmentList, setDepartmentList] = useState([]);
   const [subcontractorList, setSubcontractorList] = useState([]);
-
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const dropdownRef = useRef(null);
-
-  // Close dropdown on click outside
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setDropdownOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
 
   // Fetch roles, departments, and subcontractors dynamically
   useEffect(() => {
@@ -58,10 +104,13 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
         const roles = rolesRes?.data?.rows ?? rolesRes?.data ?? rolesRes ?? [];
         const deps = depsRes?.data?.rows ?? depsRes?.data ?? depsRes ?? [];
         const subs = subsRes?.data?.rows ?? subsRes?.data ?? subsRes ?? [];
+        const sortedSubs = [...subs].sort((a, b) =>
+          (a.subContractorName || "").localeCompare(b.subContractorName || "", undefined, { sensitivity: "base" })
+        );
 
         setRolesList(roles);
         setDepartmentList(deps);
-        setSubcontractorList(subs);
+        setSubcontractorList(sortedSubs);
       } catch (err) {
         console.error("Failed to fetch form data sources", err);
       }
@@ -75,55 +124,173 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
       setEmployeeBadgeId(initialData.badgeId || "");
       setEmployeeName(initialData.employeeName || initialData.name || "");
       setDesignation(initialData.designation || "");
-      setPhoneNumber(initialData.phonenumber || initialData.phoneNumber || "");
+      setPhoneNumber(String(initialData.phonenumber || initialData.phoneNumber || "").replace(/^\+/, ""));
       setRoleId(initialData.roleId !== undefined && initialData.roleId !== null ? String(initialData.roleId) : "");
 
-      // Parse userType (comma-separated string or array) into employeeTypes array
       const rawUserType = initialData.userType || "";
       const initialTypes = rawUserType
         ? (typeof rawUserType === "string" ? rawUserType.split(",") : Array.isArray(rawUserType) ? rawUserType : [rawUserType])
         : [];
-      setEmployeeTypes(initialTypes);
 
-      setCompanyName(initialData.companyName || "");
+      const isPureContractor = initialTypes.includes("Subcontractor") && !initialTypes.includes("Department") && !initialTypes.includes("Department1");
+      const initCompName = (isPureContractor && initialData.companyName === "NNE") ? "" : (initialData.companyName || "");
+      setCompanyName(initCompName);
       setSubContId(initialData.subContId !== undefined && initialData.subContId !== null ? String(initialData.subContId) : "");
       setDepartId(initialData.departId !== undefined && initialData.departId !== null ? String(initialData.departId) : "");
       setObserId(initialData.obserId !== undefined && initialData.obserId !== null ? String(initialData.obserId) : "");
       setAccess(initialData.access !== undefined ? (initialData.access === 1 || initialData.access === "1" || initialData.access === true) : true);
+
+      const rawModules = initialData.moduleAccess || initialData.module_access;
+      if (rawModules !== undefined && rawModules !== null && rawModules !== "") {
+        const parsedMap = parseModuleAccess(rawModules);
+        const mods = Object.keys(parsedMap);
+        setSelectedModules(mods.length > 0 ? mods : ["permit-to-work"]);
+        const typeMap = {};
+        mods.forEach((m) => {
+          let role = parsedMap[m] || initialTypes[0] || "Department";
+          if (m === "safety-inspection" && role === "Subcontractor") {
+            role = "Department";
+          } else if (m !== "permit-to-work" && role === "Department1") {
+            role = "Department";
+          }
+          typeMap[m] = role;
+        });
+        if (!typeMap["permit-to-work"] && initialTypes[0]) {
+          typeMap["permit-to-work"] = initialTypes[0];
+        }
+        setModuleUserTypes(typeMap);
+      } else {
+        setSelectedModules(["permit-to-work"]);
+        setModuleUserTypes({ "permit-to-work": initialTypes[0] || "Department" });
+      }
+
       setEmail(initialData.email || "");
+      const rawOtpType = String(initialData.otpNotificationType || initialData.otp_notification_type || "SMS").toUpperCase();
+      if (rawOtpType === "BOTH" || rawOtpType === "ALL" || (rawOtpType.includes("EMAIL") && rawOtpType.includes("SMS"))) {
+        setEnableEmailOtp(true);
+        setEnableSmsOtp(true);
+      } else if (rawOtpType === "EMAIL") {
+        setEnableEmailOtp(true);
+        setEnableSmsOtp(false);
+      } else {
+        setEnableEmailOtp(false);
+        setEnableSmsOtp(true);
+      }
       setUsername(initialData.username || "");
       setPassword(""); // Leave blank in edit mode to avoid corrupting existing password
+    } else if (!isEdit) {
+      setEnableEmailOtp(false);
+      setEnableSmsOtp(true);
     }
   }, [initialData, isEdit]);
 
-  const handleToggleOption = (value) => {
-    setEmployeeTypes((prev) => {
-      let next;
-      if (prev.includes(value)) {
-        next = prev.filter((v) => v !== value);
-      } else {
-        next = [...prev, value];
-      }
+  // Derived user types from individual module configurations
+  const activeEmployeeTypes = useMemo(() => {
+    const types = selectedModules
+      .map((m) => {
+        let role = moduleUserTypes[m];
+        if (m === "safety-inspection" && role === "Subcontractor") {
+          role = "Department";
+        }
+        return role;
+      })
+      .filter(Boolean);
+    if (types.length > 0) {
+      return Array.from(new Set(types));
+    }
+    return ["Department"];
+  }, [selectedModules, moduleUserTypes]);
 
-      // Automatically set company name if "Department" is selected but no Subcontractor is selected
-      if (next.includes("Department") || next.includes("Department1")) {
-        if (!companyName) {
-          setCompanyName("M3 Infrastructure");
+  const hasDepartment = activeEmployeeTypes.includes("Department") || activeEmployeeTypes.includes("Department1");
+  const hasContractor = activeEmployeeTypes.includes("Subcontractor");
+  const hasObserver = activeEmployeeTypes.includes("Observer");
+
+  // Show "Select Department" ONLY when Department is selected in any module dropdown
+  const shouldShowDepartment = hasDepartment;
+  // Show "Select Contractor" when Contractor is selected in any module dropdown
+  const shouldShowContractor = hasContractor;
+
+  // Synchronize companyName based on role types and selected contractor
+  useEffect(() => {
+    if (hasContractor && subContId && subcontractorList.length > 0) {
+      const matched = subcontractorList.find((s) => String(s.id) === String(subContId));
+      if (matched?.subContractorName) {
+        if (!companyName || companyName === "NNE" || !hasDepartment) {
+          setCompanyName(matched.subContractorName);
         }
       }
+    } else if (hasDepartment && !hasContractor) {
+      if (!companyName || (subcontractorList.length > 0 && subcontractorList.some((s) => s.subContractorName === companyName))) {
+        setCompanyName("NNE");
+      }
+    } else if (!hasDepartment && hasContractor && !subContId) {
+      if (companyName === "NNE") {
+        setCompanyName("");
+      }
+    }
+  }, [hasDepartment, hasContractor, subContId, subcontractorList, companyName]);
 
-      // Reset fields if option group is completely deselected
-      if (!next.includes("Subcontractor")) {
-        setSubContId("");
+  // Cleanup selection IDs if types are no longer in selected modules
+  useEffect(() => {
+    if (!shouldShowContractor && subContId) {
+      setSubContId("");
+    }
+    if (!shouldShowDepartment && departId) {
+      setDepartId("");
+    }
+    if (!hasObserver && obserId) {
+      setObserId("");
+    }
+  }, [shouldShowContractor, shouldShowDepartment, hasObserver, subContId, departId, obserId]);
+
+  const handleToggleChannel = (channel) => {
+    if (channel === "EMAIL") {
+      if (enableEmailOtp && !enableSmsOtp) {
+        showError("At least one OTP notification channel must be selected.");
+        return;
       }
-      if (!next.includes("Department") && !next.includes("Department1")) {
-        setDepartId("");
+      setEnableEmailOtp(prev => !prev);
+    } else if (channel === "SMS") {
+      if (enableSmsOtp && !enableEmailOtp) {
+        showError("At least one OTP notification channel must be selected.");
+        return;
       }
-      if (!next.includes("Observer")) {
-        setObserId("");
+      setEnableSmsOtp(prev => !prev);
+    }
+  };
+
+  const handleToggleModule = (modId) => {
+    setSelectedModules((prev) => {
+      const isAlreadySelected = prev.includes(modId);
+      if (isAlreadySelected) {
+        const next = prev.filter((id) => id !== modId);
+        setModuleUserTypes((prevTypes) => {
+          const updated = { ...prevTypes };
+          delete updated[modId];
+          return updated;
+        });
+        return next;
+      } else {
+        const validOptions = getModuleUserTypeOptions(modId);
+        const defaultRole = validOptions[0]?.value || "Department";
+        setModuleUserTypes((prevTypes) => ({
+          ...prevTypes,
+          [modId]: prevTypes[modId] || defaultRole,
+        }));
+        return [...prev, modId];
       }
-      return next;
     });
+  };
+
+  const handleModuleUserTypeChange = (modId, roleValue) => {
+    let effectiveRole = roleValue;
+    if (modId === "safety-inspection" && roleValue === "Subcontractor") {
+      effectiveRole = "Department";
+    }
+    setModuleUserTypes((prev) => ({
+      ...prev,
+      [modId]: effectiveRole,
+    }));
   };
 
   const handleContractorChange = (e) => {
@@ -133,10 +300,13 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
     const matched = subcontractorList.find((s) => String(s.id) === String(selectedId));
     if (matched) {
       setCompanyName(matched.subContractorName);
-      setDepartId(matched.departId || "");
+      if (hasDepartment && matched.departId) {
+        setDepartId(matched.departId);
+      }
     } else {
-      setCompanyName("");
-      setDepartId("");
+      if (!hasDepartment) {
+        setCompanyName("");
+      }
     }
   };
 
@@ -144,36 +314,22 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
     setDepartId(e.target.value);
   };
 
-  // Get dynamic display text for the select button
-  const getDropdownLabel = () => {
-    if (employeeTypes.length === 0) return "Select Employee Type(s)";
-    return employeeTypes
-      .map((val) => EMPLOYEE_TYPE_OPTIONS.find((opt) => opt.value === val)?.label)
-      .filter(Boolean)
-      .join(", ");
-  };
-
   // ── Submit ────────────────────────────────────────────────────────────────
   const handleSubmit = (e) => {
     e.preventDefault();
 
-    if (!employeeTypes || employeeTypes.length === 0 || !employeeTypes.join(",").trim()) {
-      showError("Please select at least one Employee Type");
+    if (selectedModules.length === 0) {
+      showError("Please select at least one Module Access permission");
       return;
     }
 
-    if ((employeeTypes.includes("Department") || employeeTypes.includes("Department1")) && !departId) {
+    if (shouldShowDepartment && !departId) {
       showError("Please select a Department");
       return;
     }
 
-    if (employeeTypes.includes("Subcontractor") && !subContId) {
+    if (shouldShowContractor && !subContId) {
       showError("Please select a Contractor");
-      return;
-    }
-
-    if (employeeTypes.includes("Observer") && !obserId) {
-      showError("Please select a Department for Observer");
       return;
     }
 
@@ -188,18 +344,65 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
       }
     }
 
+    if (!enableEmailOtp && !enableSmsOtp) {
+      showError("Please select at least one Login OTP Notification channel (Email or SMS)");
+      return;
+    }
+
+    if (!email || !email.trim()) {
+      showError("Email Address is mandatory");
+      return;
+    }
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      showError("Please enter a valid email address");
+      return;
+    }
+
+    if (enableSmsOtp) {
+      if (!phoneNumber || !phoneNumber.trim()) {
+        showError("Phone Number is required when SMS OTP notification is selected");
+        return;
+      }
+    }
+
+    const otpNotificationType = enableEmailOtp && enableSmsOtp ? "BOTH" : enableEmailOtp ? "EMAIL" : "SMS";
+
+    const activeModuleRoles = selectedModules.map((m) => {
+      let roleVal = moduleUserTypes[m] || "Department";
+      if (m === "safety-inspection" && roleVal === "Subcontractor") {
+        roleVal = "Department";
+      }
+      return `${m}:${roleVal}`;
+    });
+    const moduleAccessPayload = access ? activeModuleRoles.join(",") : "";
+
+    const resolvedObserId = obserId || (hasObserver ? (departId || 1) : null);
+
+    const matchedContractor = subcontractorList.find((s) => String(s.id) === String(subContId));
+    let finalCompanyName = companyName;
+    if (hasContractor && matchedContractor) {
+      if (!finalCompanyName || finalCompanyName === "NNE" || !hasDepartment) {
+        finalCompanyName = matchedContractor.subContractorName;
+      }
+    } else if (hasDepartment && !hasContractor) {
+      finalCompanyName = finalCompanyName || "NNE";
+    }
+
     const payload = {
       badgeId: employeeBadgeId,
       employeeName: employeeName,
       designation,
       phonenumber: phoneNumber,
+      otpNotificationType,
       roleId: roleId ? Number(roleId) : 4,
-      userType: employeeTypes.join(","),
-      companyName,
-      subContId: (employeeTypes.includes("Subcontractor") && subContId) ? Number(subContId) : null,
-      departId: ((employeeTypes.includes("Department") || employeeTypes.includes("Department1")) && departId) ? Number(departId) : null,
-      obserId: (employeeTypes.includes("Observer") && obserId) ? Number(obserId) : null,
+      userType: activeEmployeeTypes.join(","),
+      companyName: finalCompanyName,
+      subContId: shouldShowContractor && subContId ? Number(subContId) : null,
+      departId: shouldShowDepartment && departId ? Number(departId) : null,
+      obserId: hasObserver ? Number(resolvedObserId || 1) : null,
       access: access ? "1" : "0",
+      moduleAccess: moduleAccessPayload,
       email,
       username: access ? username : "",
       password: access ? password : "",
@@ -263,14 +466,17 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
           <label className="df-label">
             Phone Number <span className="df-required">*</span>
           </label>
-          <input
-            type="text"
-            className="df-input"
-            value={phoneNumber}
-            onChange={(e) => setPhoneNumber(e.target.value)}
-            placeholder="Phone Number"
-            required
-          />
+          <div className="df-phone-group">
+            <span className="df-phone-prefix">+</span>
+            <input
+              type="text"
+              className="df-phone-input"
+              value={phoneNumber}
+              onChange={(e) => setPhoneNumber(e.target.value.replace(/^\+/, ""))}
+              placeholder="Phone Number"
+              required
+            />
+          </div>
         </div>
 
         {/* Select Role */}
@@ -291,109 +497,6 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
           </select>
         </div>
 
-        {/* Custom Multi-select Dropdown for Employee Types */}
-        <div className="df-field" ref={dropdownRef} style={{ position: "relative" }}>
-          <label className="df-label">
-            Select Employee Type(s) <span className="df-required">*</span>
-          </label>
-          <div
-            onClick={() => setDropdownOpen((prev) => !prev)}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              width: "100%",
-              height: "46px",
-              padding: "0 14px",
-              fontSize: "14px",
-              fontWeight: 500,
-              color: "#f9fafb",
-              backgroundColor: "#1f2937",
-              border: "1.5px solid #374151",
-              borderRadius: "12px",
-              cursor: "pointer",
-              userSelect: "none",
-            }}
-          >
-            <span style={{
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              maxWidth: "calc(100% - 24px)"
-            }}>
-              {getDropdownLabel()}
-            </span>
-            <span style={{
-              display: "inline-block",
-              width: "0",
-              height: "0",
-              marginLeft: "8px",
-              verticalAlign: "middle",
-              borderTop: "6px solid #9ca3af",
-              borderRight: "6px solid transparent",
-              borderLeft: "6px solid transparent",
-              transition: "transform 0.2s",
-              transform: dropdownOpen ? "rotate(180deg)" : "rotate(0)",
-            }} />
-          </div>
-
-          {dropdownOpen && (
-            <div
-              style={{
-                position: "absolute",
-                top: "76px",
-                left: 0,
-                width: "100%",
-                backgroundColor: "#111827",
-                border: "1.5px solid #374151",
-                borderRadius: "12px",
-                boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.5)",
-                zIndex: 100000,
-                overflow: "hidden",
-                padding: "6px 0",
-              }}
-            >
-              {EMPLOYEE_TYPE_OPTIONS.map((opt) => {
-                const isChecked = employeeTypes.includes(opt.value);
-                return (
-                  <div
-                    key={opt.value}
-                    onClick={() => handleToggleOption(opt.value)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "10px",
-                      padding: "10px 14px",
-                      cursor: "pointer",
-                      transition: "background-color 0.2s",
-                      userSelect: "none",
-                      color: "#f9fafb",
-                      backgroundColor: isChecked ? "#1f2937" : "transparent",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#1f2937"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = isChecked ? "#1f2937" : "transparent"; }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      readOnly
-                      style={{
-                        width: "16px",
-                        height: "16px",
-                        accentColor: "#00e5a0",
-                        cursor: "pointer",
-                      }}
-                    />
-                    <span style={{ fontSize: "14px", fontWeight: 500 }}>
-                      {opt.label}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
         {/* Company Name */}
         <div className="df-field">
           <label className="df-label">Company Name</label>
@@ -406,8 +509,8 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
           />
         </div>
 
-        {/* Conditional Select Department */}
-        {(employeeTypes.includes("Department") || employeeTypes.includes("Department1")) && (
+        {/* Select Department Dropdown (shown whenever Department OR Contractor is selected in any module) */}
+        {shouldShowDepartment && (
           <div className="df-field">
             <label className="df-label">
               Select Department <span className="df-required">*</span>
@@ -426,28 +529,8 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
           </div>
         )}
 
-        {/* Conditional Select Department for Observer */}
-        {employeeTypes.includes("Observer") && (
-          <div className="df-field">
-            <label className="df-label">
-              Select Department <span className="df-required">*</span>
-            </label>
-            <select
-              className="df-select"
-              value={obserId}
-              onChange={(e) => setObserId(e.target.value)}
-              required
-            >
-              <option value="">Select Department</option>
-              {departmentList.map((dep) => (
-                <option key={dep.id} value={dep.id}>{dep.departmentName}</option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        {/* Conditional Select Contractor */}
-        {employeeTypes.includes("Subcontractor") && (
+        {/* Select Contractor Dropdown (shown when Contractor is selected in any module) */}
+        {shouldShowContractor && (
           <div className="df-field">
             <label className="df-label">
               Select Contractor <span className="df-required">*</span>
@@ -496,6 +579,151 @@ function Employeesform({ onClose, initialData, isEdit, onSubmit }) {
                 boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
               }}
             />
+          </div>
+        </div>
+
+        {/* Module Access Checkboxes with Individual User Types */}
+        {access && (
+          <div className="df-modules-wrapper">
+            <div className="df-modules-header">
+              <label className="df-modules-title">
+                Module Access Permissions &amp; Assigned User Types
+              </label>
+              <span className="df-modules-subtitle">
+                Select access and assign specific user type per module
+              </span>
+            </div>
+            
+            <div className="df-modules-grid">
+              {MODULE_OPTIONS.map((mod) => {
+                const isChecked = selectedModules.includes(mod.id);
+                let currentRole = moduleUserTypes[mod.id] || "Department";
+                if (mod.id === "safety-inspection" && currentRole === "Subcontractor") {
+                  currentRole = "Department";
+                }
+
+                return (
+                  <div
+                    key={mod.id}
+                    className={`df-module-card ${isChecked ? "checked" : ""}`}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <label className="df-module-label">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => handleToggleModule(mod.id)}
+                          style={{
+                            width: "18px",
+                            height: "18px",
+                            accentColor: "#00e5a0",
+                            cursor: "pointer",
+                          }}
+                        />
+                        <span>{mod.label}</span>
+                      </label>
+
+                      {isChecked && (
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            fontWeight: 700,
+                            padding: "2px 8px",
+                            borderRadius: "6px",
+                            textTransform: "uppercase",
+                            backgroundColor:
+                              currentRole === "Observer"
+                                ? "rgba(99, 102, 241, 0.15)"
+                                : currentRole === "Subcontractor"
+                                ? "rgba(245, 158, 11, 0.15)"
+                                : "rgba(16, 185, 129, 0.15)",
+                            color:
+                              currentRole === "Observer"
+                                ? "#4f46e5"
+                                : currentRole === "Subcontractor"
+                                ? "#d97706"
+                                : "#059669",
+                            border: `1px solid ${
+                              currentRole === "Observer"
+                                ? "rgba(99, 102, 241, 0.35)"
+                                : currentRole === "Subcontractor"
+                                ? "rgba(245, 158, 11, 0.35)"
+                                : "rgba(16, 185, 129, 0.35)"
+                            }`,
+                          }}
+                        >
+                          {getUserTypeLabel(currentRole, mod.id)}
+                        </span>
+                      )}
+                    </div>
+
+                    {isChecked && (
+                      <div className="df-module-select-row">
+                        <span className="df-module-select-label">
+                          User Type:
+                        </span>
+                        <select
+                          className="df-module-select"
+                          value={mod.id === "permit-to-work" ? currentRole : (currentRole === "Department1" ? "Department" : currentRole)}
+                          onChange={(e) => handleModuleUserTypeChange(mod.id, e.target.value)}
+                        >
+                          {getModuleUserTypeOptions(mod.id).map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Login OTP Notification Channels */}
+        <div className="df-field">
+          <label className="df-label">
+            Login OTP Notification Channels <span className="df-required">*</span>
+          </label>
+          <div className="otp-channel-toggles-wrapper">
+            {/* Email Toggle */}
+            <label
+              className={`im-notif-channel-toggle email ${enableEmailOtp ? "active" : ""}`}
+              onClick={(e) => {
+                e.preventDefault();
+                handleToggleChannel("EMAIL");
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={enableEmailOtp}
+                readOnly
+              />
+              <EmailIcon />
+              <span>Email</span>
+            </label>
+
+            {/* SMS Toggle */}
+            <label
+              className={`im-notif-channel-toggle sms ${enableSmsOtp ? "active" : ""}`}
+              onClick={(e) => {
+                e.preventDefault();
+                handleToggleChannel("SMS");
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={enableSmsOtp}
+                readOnly
+              />
+              <PhoneIcon />
+              <span>SMS</span>
+            </label>
+          </div>
+          <div style={{ fontSize: "11px", color: "var(--text-muted, #94a3b8)", marginTop: "4px" }}>
+            Select Email, SMS, or both channels for login verification.
           </div>
         </div>
 
