@@ -23,9 +23,12 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
           getFloors(1, 1000),
           getZones(1, 1000)
         ]);
-        setBuildingsList(buildingsRes?.data ?? []);
-        setFloorsList(floorsRes?.data ?? []);
-        setZonesList(zonesRes?.data ?? []);
+        const bRows = buildingsRes?.data?.rows ?? (Array.isArray(buildingsRes?.data) ? buildingsRes.data : (Array.isArray(buildingsRes) ? buildingsRes : []));
+        const fRows = floorsRes?.data?.rows ?? (Array.isArray(floorsRes?.data) ? floorsRes.data : (Array.isArray(floorsRes) ? floorsRes : []));
+        const zRows = zonesRes?.data?.rows ?? (Array.isArray(zonesRes?.data) ? zonesRes.data : (Array.isArray(zonesRes) ? zonesRes : []));
+        setBuildingsList(bRows);
+        setFloorsList(fRows);
+        setZonesList(zRows);
       } catch (err) {
         console.error("Failed to fetch location data", err);
       }
@@ -35,25 +38,25 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
 
   useEffect(() => {
     if (isEdit && initialData) {
-      setRoomName(initialData.room_name || "");
-      setFloor(initialData.fl_id || "");
-      setZone(initialData.zone_id || "");
-      setBuilding(initialData.building_id || "");
+      setRoomName(initialData.room_name || initialData.name || "");
+      setFloor(initialData.fl_id || initialData.floor_id || "");
+      setZone(initialData.zone_id || initialData.id || "");
+      setBuilding(initialData.building_id || initialData.build_id || "");
 
       // Fallback: Resolve building id from floor if building_id is missing
-      if (!initialData.building_id && initialData.fl_id && floorsList.length > 0) {
-        const matched = floorsList.find(f => String(f.fl_id) === String(initialData.fl_id));
+      if ((!initialData.building_id && !initialData.build_id) && (initialData.fl_id || initialData.floor_id) && Array.isArray(floorsList) && floorsList.length > 0) {
+        const matched = floorsList.find(f => String(f.fl_id ?? f.id) === String(initialData.fl_id || initialData.floor_id));
         if (matched) {
-          setBuilding(matched.build_id || "");
+          setBuilding(matched.build_id ?? matched.building_id ?? "");
         }
       }
     }
   }, [initialData, isEdit, floorsList]);
 
-  // Filter levels based on selected building
+  // Filter floors based on selected building
   useEffect(() => {
-    if (building && floorsList.length > 0) {
-      const filtered = floorsList.filter(f => String(f.build_id) === String(building));
+    if (building && Array.isArray(floorsList) && floorsList.length > 0) {
+      const filtered = floorsList.filter(f => String(f.build_id ?? f.building_id) === String(building));
       setFilteredFloorsList(filtered);
     } else {
       setFilteredFloorsList([]);
@@ -62,25 +65,33 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
 
   // Filter zones based on selected floor
   useEffect(() => {
-    if (floor && zonesList.length > 0) {
-      const filtered = zonesList.filter(z => String(z.floor_id) === String(floor));
+    if (floor && Array.isArray(zonesList) && zonesList.length > 0) {
+      const filtered = zonesList.filter(z => {
+        if (z.floor_id && String(z.floor_id) === String(floor)) return true;
+        if (z.fl_id && String(z.fl_id) === String(floor)) return true;
+        const selectedFloorObj = floorsList.find(f => String(f.fl_id ?? f.id) === String(floor));
+        if (selectedFloorObj && z.level && z.level.trim().toLowerCase() === (selectedFloorObj.floor_name || "").trim().toLowerCase()) {
+          return true;
+        }
+        return false;
+      });
       setFilteredZonesList(filtered);
     } else {
       setFilteredZonesList([]);
     }
-  }, [floor, zonesList]);
+  }, [floor, zonesList, floorsList]);
 
   const handleBuildingChange = (e) => {
     const bId = e.target.value;
     setBuilding(bId);
-    setFloor(""); // Reset floor when building changes
-    setZone("");  // Reset zone when building changes
+    setFloor("");
+    setZone("");
   };
 
   const handleFloorChange = (e) => {
     const fId = e.target.value;
     setFloor(fId);
-    setZone("");  // Reset zone when floor changes
+    setZone("");
   };
 
   const handleSubmit = (e) => {
@@ -95,7 +106,6 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
     };
 
     onSubmit && onSubmit(payload);
-    onClose && onClose();
   };
 
   return (
@@ -112,11 +122,16 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
             value={building}
             onChange={handleBuildingChange}
             required
+            disabled={isEdit}
           >
             <option value="">Select Building</option>
-            {buildingsList.map((b) => (
-              <option key={b.build_id} value={b.build_id}>{b.building_name}</option>
-            ))}
+            {buildingsList.map((b) => {
+              const bId = b.build_id ?? b.id ?? b.building_id;
+              const bName = b.building_name ?? b.name;
+              return (
+                <option key={bId} value={bId}>{bName}</option>
+              );
+            })}
           </select>
         </div>
 
@@ -130,12 +145,16 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
             value={floor}
             onChange={handleFloorChange}
             required
-            disabled={!building}
+            disabled={isEdit || !building}
           >
             <option value="">Select Floor</option>
-            {filteredFloorsList.map((l) => (
-              <option key={l.fl_id} value={l.fl_id}>{l.floor_name}</option>
-            ))}
+            {filteredFloorsList.map((l) => {
+              const fId = l.fl_id ?? l.id ?? l.floor_id;
+              const fName = l.floor_name ?? l.name ?? l.level;
+              return (
+                <option key={fId} value={fId}>{fName}</option>
+              );
+            })}
           </select>
         </div>
 
@@ -149,12 +168,16 @@ function RoomForm({ onClose, initialData, isEdit, onSubmit }) {
             value={zone}
             onChange={(e) => setZone(e.target.value)}
             required
-            disabled={!floor}
+            disabled={isEdit || !floor}
           >
             <option value="">Select Zone</option>
-            {filteredZonesList.map((z) => (
-              <option key={z.id ?? z.zoneStatusId} value={z.id ?? z.zoneStatusId}>{z.zone}</option>
-            ))}
+            {filteredZonesList.map((z) => {
+              const zId = z.id ?? z.zoneStatusId ?? z.zone_id;
+              const zName = z.zone ?? z.zone_name;
+              return (
+                <option key={zId} value={zId}>{zName}</option>
+              );
+            })}
           </select>
         </div>
 

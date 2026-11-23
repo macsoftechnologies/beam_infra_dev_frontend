@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import { showSuccess, showError, showDeleteConfirm, showDeleteSuccess } from "../../components/common/Toast/Toast";
 import Table from "../../components/common/Table/Table";
 import Modal from "../../components/common/Modal/Modal";
-import { FaEdit, FaTrash, FaSearch, FaTimes } from "react-icons/fa";
+import { FaEdit, FaTrash, FaSearch, FaTimes, FaFileCsv, FaArrowDown } from "react-icons/fa";
+import * as XLSX from "xlsx";
 import RoomForm from "../../forms/Roomform/Roomform";
 import { addRoom, getRooms, updateRoom, deleteRoom, getBuildings, getFloors, getZones } from "../../services/authService";
 import "../styles/pages.css";
@@ -48,9 +49,12 @@ const Rooms = () => {
           getFloors(1, 1000),
           getZones(1, 1000)
         ]);
-        setBuildings(buildingsRes?.data ?? []);
-        setFloors(floorsRes?.data ?? []);
-        setZones(zonesRes?.data ?? []);
+        const bRows = buildingsRes?.data?.rows ?? (Array.isArray(buildingsRes?.data) ? buildingsRes.data : (Array.isArray(buildingsRes) ? buildingsRes : []));
+        const fRows = floorsRes?.data?.rows ?? (Array.isArray(floorsRes?.data) ? floorsRes.data : (Array.isArray(floorsRes) ? floorsRes : []));
+        const zRows = zonesRes?.data?.rows ?? (Array.isArray(zonesRes?.data) ? zonesRes.data : (Array.isArray(zonesRes) ? zonesRes : []));
+        setBuildings(bRows);
+        setFloors(fRows);
+        setZones(zRows);
       } catch (err) {
         console.error("Failed to load map data", err);
       }
@@ -60,17 +64,17 @@ const Rooms = () => {
 
   const floorMap = {};
   floors.forEach((f) => {
-    floorMap[f.fl_id] = f;
+    floorMap[f.fl_id ?? f.id] = f;
   });
 
   const buildingMap = {};
   buildings.forEach((b) => {
-    buildingMap[b.build_id] = b.building_name;
+    buildingMap[b.build_id ?? b.id] = b.building_name ?? b.name;
   });
 
   const zoneMap = {};
   zones.forEach((z) => {
-    zoneMap[z.id ?? z.zoneStatusId] = z.zone;
+    zoneMap[z.id ?? z.zoneStatusId ?? z.zone_id] = z.zone ?? z.zone_name;
   });
 
   // ─── Pagination ───────────────────────────────────────────────────────────
@@ -83,8 +87,9 @@ const Rooms = () => {
     try {
       const res = await getRooms(page, pageLimit, "", searchKeyword);
       const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
-      const count = res?.data?.count ?? res?.total ?? rawData.length;
-      setRoomList(rawData);
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      const count = res?.data?.count ?? res?.total ?? res?.count ?? rows.length;
+      setRoomList(rows);
       setTotalCount(count);
     } catch (err) {
       showError("Failed to load rooms");
@@ -106,6 +111,86 @@ const Rooms = () => {
     setFilterRoomName("");
     setAppliedRoomName("");
     setCurrentPage(1);
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const res = await getRooms(1, 100000, "", appliedRoomName);
+      const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      if (rows.length === 0) {
+        alert("No data available to export.");
+        return;
+      }
+      const headers = ["S.No", "Building", "Floor / Level", "Zone Name", "Room Name"];
+      const csvRows = rows.map((item, index) => {
+        const flObj = floorMap[item.fl_id];
+        const floorName = flObj ? flObj.floor_name : "—";
+        const bName = item.building_id ? (buildingMap[item.building_id] || "—") : (flObj ? (buildingMap[flObj.build_id] || "—") : "—");
+        const zName = zoneMap[item.zone_id] || "—";
+        return [
+          index + 1,
+          `"${bName.replace(/"/g, '""')}"`,
+          `"${floorName.replace(/"/g, '""')}"`,
+          `"${zName.replace(/"/g, '""')}"`,
+          `"${(item.room_name || "").replace(/"/g, '""')}"`
+        ].join(",");
+      });
+      const csvContent = "\uFEFF" + [headers.join(","), ...csvRows].join("\n");
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', `Rooms_Report_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error(err);
+      showError("Export failed");
+    }
+  };
+
+  const handleExportExcel = async () => {
+    try {
+      const res = await getRooms(1, 100000, "", appliedRoomName);
+      const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      if (rows.length === 0) {
+        alert("No data available to export.");
+        return;
+      }
+      const headers = ["S.No", "Building", "Floor / Level", "Zone Name", "Room Name"];
+      const wsData = [
+        headers,
+        ...rows.map((item, index) => {
+          const flObj = floorMap[item.fl_id];
+          const floorName = flObj ? flObj.floor_name : "—";
+          const bName = item.building_id ? (buildingMap[item.building_id] || "—") : (flObj ? (buildingMap[flObj.build_id] || "—") : "—");
+          const zName = zoneMap[item.zone_id] || "—";
+          return [
+            index + 1,
+            bName,
+            floorName,
+            zName,
+            item.room_name || ""
+          ];
+        })
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Rooms");
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/octet-stream' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', `Rooms_Report_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error(err);
+      showError("Export failed");
+    }
   };
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
@@ -132,19 +217,31 @@ const Rooms = () => {
 
   const handleSubmit = async (formData) => {
     try {
+      const formatMsg = (m, fallback) => Array.isArray(m) ? m.join(", ") : (m || fallback);
       if (selectedRoom && editOpen) {
-        await updateRoom(selectedRoom.room_id ?? selectedRoom.id, formData);
-        showSuccess("Room updated successfully");
+        const res = await updateRoom(selectedRoom.room_id ?? selectedRoom.id, formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to update room"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Room updated successfully"));
         setEditOpen(false);
         setSelectedRoom(null);
       } else {
-        await addRoom(formData);
-        showSuccess("Room added successfully");
+        const res = await addRoom(formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to create room"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Room added successfully"));
         setOpen(false);
+        setCurrentPage(1);
       }
-      fetchRoomsList(currentPage, appliedRoomName);
+      fetchRoomsList(1, appliedRoomName);
     } catch (err) {
-      showError("Operation failed");
+      const respMsg = err?.response?.data?.message;
+      const msg = Array.isArray(respMsg) ? respMsg.join(", ") : (respMsg || err?.message || "Operation failed");
+      showError(msg);
     }
   };
 
@@ -155,6 +252,7 @@ const Rooms = () => {
     { header: "Floor / Level", accessor: "floorName" },
     { header: "Zone Name", accessor: "zoneName" },
     { header: "Room Name", accessor: "room_name" },
+    { header: "Actions", accessor: "actions" },
   ];
 
   const tableData = roomList.map((item, index) => {
@@ -169,6 +267,24 @@ const Rooms = () => {
       floorName,
       buildingName,
       zoneName,
+      actions: (
+        <div className="dept-action-btns">
+          <button
+            className="dept-action-btn dept-action-btn--edit"
+            title="Edit"
+            onClick={() => handleEdit(item, index)}
+          >
+            <FaEdit />
+          </button>
+          <button
+            className="dept-action-btn dept-action-btn--delete"
+            title="Delete"
+            onClick={() => handleDelete(item)}
+          >
+            <FaTrash />
+          </button>
+        </div>
+      ),
     };
   });
 
@@ -188,6 +304,13 @@ const Rooms = () => {
           <span className="dept-count-badge">
             {totalCount || roomList.length} Total
           </span>
+          <button
+            className="dept-add-btn"
+            onClick={() => { setSelectedRoom(null); setOpen(true); }}
+          >
+            <span className="dept-add-btn__icon">＋</span>
+            Add Room
+          </button>
         </div>
       </div>
 
@@ -233,6 +356,14 @@ const Rooms = () => {
 
       {/* ── Table Card ── */}
       <div className="dept-table-card">
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px', gap: '12px' }}>
+          <button onClick={handleExportCSV} className="dept-add-btn" style={{ backgroundColor: '#22C55E', border: 'none', cursor: 'pointer' }}>
+            <FaFileCsv style={{ marginRight: '6px', fontSize: '1.1rem' }} /> CSV
+          </button>
+          <button onClick={handleExportExcel} className="dept-add-btn" style={{ backgroundColor: '#3B82F6', border: 'none', cursor: 'pointer' }}>
+            <FaArrowDown style={{ marginRight: '6px' }} /> Excel
+          </button>
+        </div>
         <Table
           columns={columns}
           data={tableData}

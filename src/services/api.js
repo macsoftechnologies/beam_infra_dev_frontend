@@ -19,11 +19,11 @@ api.interceptors.request.use(
         if (config.url && config.url.startsWith("/") && !config.url.startsWith("//")) {
             config.url = config.url.slice(1);
         }
-        const token = localStorage.getItem("token");
+        const token = localStorage.getItem("token") || localStorage.getItem("m3_infrastructure_token") || localStorage.getItem("m3_infrastructure_access_token") || localStorage.getItem("access_token");
         if (token) {
             config.headers.Authorization = `Bearer ${token}`;
         }
-        const userType = localStorage.getItem("UserType");
+        const userType = localStorage.getItem("UserType") || localStorage.getItem("m3_infrastructure_UserType");
         if (userType) {
             config.headers["X-User-Type"] = userType;
         }

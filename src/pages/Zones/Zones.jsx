@@ -58,7 +58,7 @@ const Zones = () => {
     const fetchB = async () => {
       try {
         const res = await getBuildings(1, 1000);
-        const rows = res?.data ?? res ?? [];
+        const rows = res?.data?.rows ?? (Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []));
         setBuildings(rows);
       } catch (err) {
         console.error("Failed to load buildings map", err);
@@ -70,7 +70,7 @@ const Zones = () => {
   // Build building lookup map
   const buildingMap = {};
   buildings.forEach((b) => {
-    buildingMap[b.build_id] = b.building_name;
+    buildingMap[b.build_id ?? b.id] = b.building_name ?? b.name;
   });
 
   // ─── Pagination ───────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ const Zones = () => {
       const res = await getZones(page, pageLimit, zoneKeyword, "", "", false, statusFilter);
       const rawData = res?.data ?? (Array.isArray(res) ? res : []);
       const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
-      const count = res?.total ?? (Array.isArray(rawData) ? rawData.length : (rawData?.count ?? 0));
+      const count = res?.total ?? res?.count ?? res?.data?.count ?? (Array.isArray(rawData) ? rawData.length : (rawData?.count ?? 0));
       setZoneList(rows);
       setTotalCount(count);
     } catch (err) {
@@ -113,7 +113,8 @@ const Zones = () => {
   const handleExportCSV = async () => {
     try {
       const res = await getZones(1, 100000, filterZoneName, "", "", true, filterStatus);
-      const rows = res?.data ?? res ?? [];
+      const rawData = res?.data ?? (Array.isArray(res) ? res : []);
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
       if (rows.length === 0) {
         alert("No data available to export.");
         return;
@@ -145,7 +146,8 @@ const Zones = () => {
   const handleExportExcel = async () => {
     try {
       const res = await getZones(1, 100000, filterZoneName, "", "", true, filterStatus);
-      const rows = res?.data ?? res ?? [];
+      const rawData = res?.data ?? (Array.isArray(res) ? res : []);
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
       if (rows.length === 0) {
         alert("No data available to export.");
         return;
@@ -202,19 +204,31 @@ const Zones = () => {
 
   const handleSubmit = async (formData) => {
     try {
+      const formatMsg = (m, fallback) => Array.isArray(m) ? m.join(", ") : (m || fallback);
       if (selectedZone && editOpen) {
-        await updateZone(selectedZone.id ?? selectedZone.zoneStatusId, formData);
-        showSuccess("Zone updated successfully");
+        const res = await updateZone(selectedZone.id ?? selectedZone.zoneStatusId, formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to update zone"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Zone updated successfully"));
         setEditOpen(false);
         setSelectedZone(null);
       } else {
-        await addZone(formData);
-        showSuccess("Zone added successfully");
+        const res = await addZone(formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to create zone"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Zone added successfully"));
         setOpen(false);
+        setCurrentPage(1);
       }
-      fetchZonesList(currentPage);
+      fetchZonesList(1);
     } catch (err) {
-      showError("Operation failed");
+      const respMsg = err?.response?.data?.message;
+      const msg = Array.isArray(respMsg) ? respMsg.join(", ") : (respMsg || err?.message || "Operation failed");
+      showError(msg);
     }
   };
 
@@ -242,6 +256,13 @@ const Zones = () => {
         >
           <FaEdit />
         </button>
+        <button
+          className="dept-action-btn dept-action-btn--delete"
+          title="Delete"
+          onClick={() => handleDelete(item)}
+        >
+          <FaTrash />
+        </button>
       </div>
     ),
   }));
@@ -262,6 +283,13 @@ const Zones = () => {
           <span className="dept-count-badge">
             {totalCount || zoneList.length} Total
           </span>
+          <button
+            className="dept-add-btn"
+            onClick={() => { setSelectedZone(null); setOpen(true); }}
+          >
+            <span className="dept-add-btn__icon">＋</span>
+            Add Zone
+          </button>
         </div>
       </div>
 

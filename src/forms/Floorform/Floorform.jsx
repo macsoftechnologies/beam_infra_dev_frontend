@@ -5,8 +5,6 @@ import "../../forms/styles/forms.css";
 function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
   const [buildId, setBuildId] = useState("");
   const [floorName, setFloorName] = useState("");
-  const [floorStatus, setFloorStatus] = useState("Active");
-  const [floorImage, setFloorImage] = useState("");
 
   const [buildingsList, setBuildingsList] = useState([]);
 
@@ -14,7 +12,7 @@ function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
     const fetchBuildings = async () => {
       try {
         const res = await getBuildings(1, 1000);
-        const rows = res?.data ?? res ?? [];
+        const rows = res?.data?.rows ?? (Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []));
         setBuildingsList(rows);
       } catch (err) {
         console.error("Failed to load buildings", err);
@@ -25,10 +23,8 @@ function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
 
   useEffect(() => {
     if (isEdit && initialData) {
-      setBuildId(initialData.build_id || "");
-      setFloorName(initialData.floor_name || "");
-      setFloorStatus(initialData.floor_status || "Active");
-      setFloorImage(initialData.floor_image || "");
+      setBuildId(initialData.build_id || initialData.building_id || "");
+      setFloorName(initialData.floor_name || initialData.name || "");
     }
   }, [initialData, isEdit]);
 
@@ -38,12 +34,9 @@ function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
 
     const payload = {
       build_id: Number(buildId),
-      floor_name: floorName,
-      // floor_status: floorStatus,
-      // floor_image: floorImage || "ground_floor_layout.png"
+      floor_name: floorName.trim(),
     };
     onSubmit && onSubmit(payload);
-    onClose && onClose();
   };
 
   return (
@@ -60,13 +53,18 @@ function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
             value={buildId}
             onChange={(e) => setBuildId(e.target.value)}
             required
+            disabled={isEdit}
           >
             <option value="">Select Building</option>
-            {buildingsList.map((b) => (
-              <option key={b.build_id} value={b.build_id}>
-                {b.building_name}
-              </option>
-            ))}
+            {buildingsList.map((b) => {
+              const bId = b.build_id ?? b.id ?? b.building_id;
+              const bName = b.building_name ?? b.name;
+              return (
+                <option key={bId} value={bId}>
+                  {bName}
+                </option>
+              );
+            })}
           </select>
         </div>
 
@@ -84,22 +82,6 @@ function FloorForm({ onClose, initialData, isEdit, onSubmit }) {
             required
           />
         </div>
-
-        {/* Status */}
-        {/* <div className="df-field df-field--full">
-          <label className="df-label">
-            Status <span className="df-required">*</span>
-          </label>
-          <select
-            className="df-select"
-            value={floorStatus}
-            onChange={(e) => setFloorStatus(e.target.value)}
-            required
-          >
-            <option value="Active">Active</option>
-            <option value="Inactive">Inactive</option>
-          </select>
-        </div> */}
 
       </div>
 

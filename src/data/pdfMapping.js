@@ -8,8 +8,21 @@ import HovvejWestPdf from "../assets/drawings/m3Infrastructure/plans/HovvejWest/
 import NNEastPdf from "../assets/drawings/m3Infrastructure/plans/NN-East/NN-East.pdf";
 import PHusPdf from "../assets/drawings/m3Infrastructure/plans/P-hus/P-hus.pdf";
 import RendsborgParkPdf from "../assets/drawings/m3Infrastructure/plans/RendsborgPark/RendsborgPark.pdf";
+import PPVPdf from "../assets/drawings/m3Infrastructure/plans/PPV/PPV.pdf";
+import TransferlinePdf from "../assets/drawings/m3Infrastructure/plans/Transferline/Transferline.pdf"
 
 export const FLOOR_PDFS = {
+
+  // Building 24 - PPV
+  "24": {
+    "PPV": PPVPdf,
+  },
+
+  // Building 23 - Transferline
+  "23": {
+    "Transferline": TransferlinePdf,
+  },
+  
   // Building 13 - APM Terminal
   "22": {
     "APM Terminal": APMTerminalPdf,
@@ -59,4 +72,6 @@ export const FLOOR_PDFS = {
   "13": {
     "BA-DD Zone 1 - Zone 2": BADDPdf,
   },
+
+
 };

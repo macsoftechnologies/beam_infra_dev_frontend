@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from "react";
 import { showSuccess, showError, showDeleteConfirm, showDeleteSuccess } from "../../components/common/Toast/Toast";
 import Table from "../../components/common/Table/Table";
 import Modal from "../../components/common/Modal/Modal";
-import { FaEdit, FaTrash, FaSearch, FaTimes } from "react-icons/fa";
+import { FaEdit, FaTrash, FaSearch, FaTimes, FaFileCsv, FaArrowDown } from "react-icons/fa";
+import * as XLSX from "xlsx";
 import FloorForm from "../../forms/Floorform/Floorform";
 import { addFloor, getFloors, updateFloor, deleteFloor, getBuildings } from "../../services/authService";
 import "../styles/pages.css";
@@ -42,7 +43,7 @@ const Floors = () => {
     const fetchB = async () => {
       try {
         const res = await getBuildings(1, 1000);
-        const rows = res?.data ?? res ?? [];
+        const rows = res?.data?.rows ?? (Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []));
         setBuildings(rows);
       } catch (err) {
         console.error("Failed to load buildings map", err);
@@ -54,7 +55,7 @@ const Floors = () => {
   // Build building lookup map
   const buildingMap = {};
   buildings.forEach((b) => {
-    buildingMap[b.build_id] = b.building_name;
+    buildingMap[b.build_id ?? b.id] = b.building_name ?? b.name;
   });
 
   // ─── Pagination ───────────────────────────────────────────────────────────
@@ -67,8 +68,9 @@ const Floors = () => {
     try {
       const res = await getFloors(page, pageLimit, "", searchKeyword);
       const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
-      const count = res?.data?.count ?? res?.total ?? rawData.length;
-      setFloorList(rawData);
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      const count = res?.data?.count ?? res?.total ?? res?.count ?? rows.length;
+      setFloorList(rows);
       setTotalCount(count);
     } catch (err) {
       showError("Failed to load floors");
@@ -90,6 +92,72 @@ const Floors = () => {
     setFilterFloorName("");
     setAppliedFloorName("");
     setCurrentPage(1);
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const res = await getFloors(1, 100000, "", appliedFloorName);
+      const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      if (rows.length === 0) {
+        alert("No data available to export.");
+        return;
+      }
+      const headers = ["S.No", "Building", "Floor Name"];
+      const csvRows = rows.map((item, index) => {
+        return [
+          index + 1,
+          `"${(buildingMap[item.build_id] || "—").replace(/"/g, '""')}"`,
+          `"${(item.floor_name || "").replace(/"/g, '""')}"`
+        ].join(",");
+      });
+      const csvContent = "\uFEFF" + [headers.join(","), ...csvRows].join("\n");
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', `Floors_Report_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error(err);
+      showError("Export failed");
+    }
+  };
+
+  const handleExportExcel = async () => {
+    try {
+      const res = await getFloors(1, 100000, "", appliedFloorName);
+      const rawData = res?.data?.rows ?? res?.data ?? res ?? [];
+      const rows = Array.isArray(rawData) ? rawData : (rawData?.rows ?? []);
+      if (rows.length === 0) {
+        alert("No data available to export.");
+        return;
+      }
+      const headers = ["S.No", "Building", "Floor Name"];
+      const wsData = [
+        headers,
+        ...rows.map((item, index) => [
+          index + 1,
+          buildingMap[item.build_id] || "—",
+          item.floor_name || ""
+        ])
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Floors");
+      const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+      const blob = new Blob([wbout], { type: 'application/octet-stream' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.setAttribute('download', `Floors_Report_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err) {
+      console.error(err);
+      showError("Export failed");
+    }
   };
 
   // ─── Handlers ─────────────────────────────────────────────────────────────
@@ -116,19 +184,31 @@ const Floors = () => {
 
   const handleSubmit = async (formData) => {
     try {
+      const formatMsg = (m, fallback) => Array.isArray(m) ? m.join(", ") : (m || fallback);
       if (selectedFloor && editOpen) {
-        await updateFloor(selectedFloor.fl_id ?? selectedFloor.id, formData);
-        showSuccess("Floor updated successfully");
+        const res = await updateFloor(selectedFloor.fl_id ?? selectedFloor.id, formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to update floor"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Floor updated successfully"));
         setEditOpen(false);
         setSelectedFloor(null);
       } else {
-        await addFloor(formData);
-        showSuccess("Floor added successfully");
+        const res = await addFloor(formData);
+        if (res && (res.statusCode >= 400 || res.status === "error" || res.status === 500)) {
+          showError(formatMsg(res.message, "Failed to create floor"));
+          return;
+        }
+        showSuccess(formatMsg(res?.message, "Floor added successfully"));
         setOpen(false);
+        setCurrentPage(1);
       }
-      fetchFloorsList(currentPage, appliedFloorName);
+      fetchFloorsList(1, appliedFloorName);
     } catch (err) {
-      showError("Operation failed");
+      const respMsg = err?.response?.data?.message;
+      const msg = Array.isArray(respMsg) ? respMsg.join(", ") : (respMsg || err?.message || "Operation failed");
+      showError(msg);
     }
   };
 
@@ -137,12 +217,31 @@ const Floors = () => {
     { header: "S.No", accessor: "serial" },
     { header: "Building", accessor: "buildingName" },
     { header: "Floor Name", accessor: "floor_name" },
+    { header: "Actions", accessor: "actions" },
   ];
 
   const tableData = floorList.map((item, index) => ({
     ...item,
     serial: startIndex + index + 1,
     buildingName: buildingMap[item.build_id] || "—",
+    actions: (
+      <div className="dept-action-btns">
+        <button
+          className="dept-action-btn dept-action-btn--edit"
+          title="Edit"
+          onClick={() => handleEdit(item, index)}
+        >
+          <FaEdit />
+        </button>
+        <button
+          className="dept-action-btn dept-action-btn--delete"
+          title="Delete"
+          onClick={() => handleDelete(item)}
+        >
+          <FaTrash />
+        </button>
+      </div>
+    ),
   }));
 
   // ─── Render ───────────────────────────────────────────────────────────────
@@ -161,13 +260,13 @@ const Floors = () => {
           <span className="dept-count-badge">
             {totalCount || floorList.length} Total
           </span>
-          {/* <button
+          <button
             className="dept-add-btn"
             onClick={() => { setSelectedFloor(null); setOpen(true); }}
           >
             <span className="dept-add-btn__icon">＋</span>
             Add Floor
-          </button> */}
+          </button>
         </div>
       </div>
 
@@ -194,8 +293,7 @@ const Floors = () => {
                 onClick={handleFilter}
                 type="button"
                 className="dept-add-btn"
-                style={{ background: 'linear-gradient(135deg, #38bdf8 0%, #0ea5e9 100%)', color: '#fff', border: '1.5px solid #38bdf8', cursor: 'pointer', display: 'flex', alignItems: 'center', boxShadow: '0 4px 18px rgba(14,165,233,0.35)', transition: 'all 0.2s ease' }}
-              >
+                style={{ background: 'linear-gradient(135deg, #38bdf8 0%, #0ea5e9 100%)', color: '#fff', border: '1.5px solid #38bdf8', cursor: 'pointer', display: 'flex', alignItems: 'center', boxShadow: '0 4px 18px rgba(14,165,233,0.35)', transition: 'all 0.2s ease' }}>
                 <FaSearch style={{ marginRight: '6px' }} /> Search
               </button>
               <button
@@ -213,6 +311,14 @@ const Floors = () => {
 
       {/* ── Table Card ── */}
       <div className="dept-table-card">
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px', gap: '12px' }}>
+          <button onClick={handleExportCSV} className="dept-add-btn" style={{ backgroundColor: '#22C55E', border: 'none', cursor: 'pointer' }}>
+            <FaFileCsv style={{ marginRight: '6px', fontSize: '1.1rem' }} /> CSV
+          </button>
+          <button onClick={handleExportExcel} className="dept-add-btn" style={{ backgroundColor: '#3B82F6', border: 'none', cursor: 'pointer' }}>
+            <FaArrowDown style={{ marginRight: '6px' }} /> Excel
+          </button>
+        </div>
         <Table
           columns={columns}
           data={tableData}

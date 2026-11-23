@@ -13,9 +13,13 @@ export const FLOOR_MAPPING = {
 
   19: ["Rendsborg Park"],
 
-  20: ["EH Lake East"] ,
+  20: ["EH Lake East"],
 
   21: ["EH Lake West"],
 
-  22: ["APM Terminal"]
-};
+  22: ["APM Terminal"],
+
+  23: ["Transferline"],
+
+  24: ["PPV"]
+};  

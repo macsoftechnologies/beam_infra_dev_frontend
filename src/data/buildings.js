@@ -39,4 +39,12 @@ export const BUILDINGS = [
     id: "22",
     name: "APM Terminal",
   },
+  { 
+    id: "23",
+    name: "Transferline"
+  },
+  { 
+    id: "24",
+    name: "PPV"
+  }
 ];

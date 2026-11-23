@@ -11,6 +11,7 @@ const STATUS_OPTIONS = [
 function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
   const [building, setBuilding] = useState(""); // building_id
   const [level, setLevel] = useState(""); // floor_id
+  const [levelName, setLevelName] = useState(""); // level string
   const [zone, setZone] = useState("");
   const [status, setStatus] = useState("UC");
 
@@ -26,8 +27,10 @@ function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
           getBuildings(1, 1000),
           getFloors(1, 1000)
         ]);
-        setBuildingsList(buildingsRes?.data ?? []);
-        setFloorsList(floorsRes?.data ?? []);
+        const bRows = buildingsRes?.data?.rows ?? (Array.isArray(buildingsRes?.data) ? buildingsRes.data : (Array.isArray(buildingsRes) ? buildingsRes : []));
+        const fRows = floorsRes?.data?.rows ?? (Array.isArray(floorsRes?.data) ? floorsRes.data : (Array.isArray(floorsRes) ? floorsRes : []));
+        setBuildingsList(bRows);
+        setFloorsList(fRows);
       } catch (err) {
         console.error("Failed to fetch buildings or floors", err);
       }
@@ -37,17 +40,26 @@ function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
 
   useEffect(() => {
     if (isEdit && initialData) {
-      setBuilding(initialData.building_id || "");
-      setLevel(initialData.floor_id || "");
-      setZone(initialData.zone || "");
+      setBuilding(initialData.building_id || initialData.build_id || "");
+      const fId = initialData.floor_id || initialData.fl_id || "";
+      if (fId) {
+        setLevel(fId);
+      } else if (initialData.level && Array.isArray(floorsList) && floorsList.length > 0) {
+        const found = floorsList.find(f => (f.floor_name || f.name) === initialData.level);
+        if (found) {
+          setLevel(found.fl_id ?? found.id ?? found.floor_id ?? "");
+        }
+      }
+      setLevelName(initialData.level || "");
+      setZone(initialData.zone || initialData.zone_name || "");
       setStatus(initialData.status || "UC");
     }
-  }, [initialData, isEdit]);
+  }, [initialData, isEdit, floorsList]);
 
   // Filter levels based on selected building
   useEffect(() => {
-    if (building && floorsList.length > 0) {
-      const filtered = floorsList.filter(f => String(f.build_id) === String(building));
+    if (building && Array.isArray(floorsList) && floorsList.length > 0) {
+      const filtered = floorsList.filter(f => String(f.build_id ?? f.building_id) === String(building));
       setFilteredFloorsList(filtered);
     } else {
       setFilteredFloorsList([]);
@@ -58,25 +70,37 @@ function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
     const bId = e.target.value;
     setBuilding(bId);
     setLevel(""); // Reset floor when building changes
+    setLevelName("");
+  };
+
+  const handleLevelChange = (e) => {
+    const fId = e.target.value;
+    setLevel(fId);
+    const allFloors = [...filteredFloorsList, ...(Array.isArray(floorsList) ? floorsList : [])];
+    const matched = allFloors.find(f => String(f.fl_id ?? f.id ?? f.floor_id) === String(fId));
+    setLevelName(matched ? (matched.floor_name || matched.name || matched.level || "") : "");
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (!building || !level || !zone.trim()) return;
 
-    const matchedFloor = floorsList.find(f => String(f.fl_id) === String(level));
-    const levelName = matchedFloor ? matchedFloor.floor_name : "";
+    let finalLevelName = levelName;
+    if (!finalLevelName) {
+      const allFloors = [...filteredFloorsList, ...(Array.isArray(floorsList) ? floorsList : [])];
+      const matched = allFloors.find(f => String(f.fl_id ?? f.id ?? f.floor_id) === String(level));
+      finalLevelName = matched ? (matched.floor_name || matched.name || matched.level || "") : "";
+    }
 
     const payload = {
-      building_id: building ? Number(building) : null,
-      floor_id: level ? Number(level) : null,
-      level: levelName,
+      building_id: Number(building),
+      floor_id: Number(level),
+      level: finalLevelName,
       zone: zone.trim(),
-      status
+      status: status || "UC",
     };
 
     onSubmit && onSubmit(payload);
-    onClose && onClose();
   };
 
   return (
@@ -96,9 +120,13 @@ function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
             disabled={isEdit}
           >
             <option value="">Select Building</option>
-            {buildingsList.map((b) => (
-              <option key={b.build_id} value={b.build_id}>{b.building_name}</option>
-            ))}
+            {buildingsList.map((b) => {
+              const bId = b.build_id ?? b.id ?? b.building_id;
+              const bName = b.building_name ?? b.name;
+              return (
+                <option key={bId} value={bId}>{bName}</option>
+              );
+            })}
           </select>
         </div>
 
@@ -110,14 +138,18 @@ function ZoneForm({ onClose, initialData, isEdit, onSubmit }) {
           <select
             className="df-select"
             value={level}
-            onChange={(e) => setLevel(e.target.value)}
+            onChange={handleLevelChange}
             required
             disabled={isEdit || !building}
           >
             <option value="">Select Level</option>
-            {filteredFloorsList.map((l) => (
-              <option key={l.fl_id} value={l.fl_id}>{l.floor_name}</option>
-            ))}
+            {filteredFloorsList.map((l) => {
+              const fId = l.fl_id ?? l.id ?? l.floor_id;
+              const fName = l.floor_name ?? l.name ?? l.level;
+              return (
+                <option key={fId} value={fId}>{fName}</option>
+              );
+            })}
           </select>
         </div>
 
